@@ -427,7 +427,11 @@ impl AttemptGuard {
             return true;
         }
         let input_failure = match self.input_gate.clone() {
-            Some(gate) => gate.wait(&self.bridge).await.err(),
+            Some(gate) => gate
+                .wait(&self.bridge)
+                .await
+                .and_then(|d| d.require_allow())
+                .err(),
             None => None,
         };
         let outcome = if input_failure.is_some() {
@@ -509,6 +513,15 @@ impl AttemptGuard {
         // cancellation, and the caller treats the failure as fatal so no
         // successor is ever dispatched over an unsettled attempt.
         delivered
+    }
+
+    /// Fail unreleased work without replacing a retained meter after delivery failure.
+    pub(crate) async fn fail_before_release(&mut self, failure: &Failure) {
+        if self.attempt_id.is_some() {
+            self.settle("failed", None, &[], Some(failure), true).await;
+        } else {
+            self.abandon(failure).await;
+        }
     }
 
     /// Settle the active attempt as cancelled and finalize the request.

@@ -21,6 +21,13 @@ from exp.runtime.gateway.guardrails.contracts import GuardrailPolicy, GuardrailR
 
 if TYPE_CHECKING:
     from exp.runtime.gateway.guardrails.enforcement import GuardrailEngine
+    from exp.runtime.gateway.native_execution import InflightRequest
+
+
+def discard_input_gate(entry: InflightRequest | None) -> None:
+    """Cancel inspection after removing its request from the accounting registry."""
+    if entry is not None and entry.input_guardrail_gate is not None:
+        entry.input_guardrail_gate.cancel()
 
 
 def can_overlap_input(engine: GuardrailEngine | None, request: GatewayRequest) -> bool:

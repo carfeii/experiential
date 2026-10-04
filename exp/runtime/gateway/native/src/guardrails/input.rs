@@ -18,7 +18,22 @@ use crate::waterfall::{acquire_attempt, WaterfallContext, Won};
 pub(crate) struct InputGate {
     request_id: String,
     deadline: Instant,
-    decision: OnceCell<Result<(), Failure>>,
+    decision: OnceCell<Result<InputDecision, Failure>>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum InputDecision {
+    Allowed,
+    AdmissionClosed,
+}
+
+impl InputDecision {
+    pub(crate) fn require_allow(self) -> Result<(), Failure> {
+        match self {
+            Self::Allowed => Ok(()),
+            Self::AdmissionClosed => Err(unavailable()),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -35,7 +50,7 @@ fn unavailable() -> Failure {
 }
 
 impl InputGate {
-    pub(crate) async fn wait(&self, bridge: &Bridge) -> Result<(), Failure> {
+    pub(crate) async fn wait(&self, bridge: &Bridge) -> Result<InputDecision, Failure> {
         self.decision
             .get_or_init(|| async {
                 // Each callback is a nonblocking poll. No classifier can occupy
@@ -53,7 +68,8 @@ impl InputGate {
                     let decision: Decision =
                         serde_json::from_str(&response).map_err(|_| unavailable())?;
                     match decision.action.as_str() {
-                        "allow" => return Ok(()),
+                        "allow" => return Ok(InputDecision::Allowed),
+                        "closed" => return Ok(InputDecision::AdmissionClosed),
                         "error" => return Err(decision.failure.unwrap_or_else(unavailable)),
                         "pending" if Instant::now() < self.deadline => {
                             tokio::time::sleep(
@@ -69,6 +85,15 @@ impl InputGate {
             .await
             .clone()
     }
+}
+
+fn release(won: Won, decision: InputDecision) -> Result<Won, Failure> {
+    // A terminal admission failure owns its public error. A closed admission
+    // never authorizes releasing a provider completion or any prefix.
+    if matches!(won, Won::Failed(_)) {
+        return Ok(won);
+    }
+    decision.require_allow().map(|()| won)
 }
 
 /// Generate and inspect concurrently, withholding all protocol/replay/capture output.
@@ -92,12 +117,15 @@ pub(crate) async fn acquire_guarded_attempt(
         tokio::select! {
             biased;
             decision = gate.wait(ctx.bridge) => match decision {
-                Ok(()) => Ok(acquire.await),
+                Ok(decision) => release(acquire.await, decision),
                 Err(failure) => Err(failure),
             },
-            won = &mut acquire => match gate.wait(ctx.bridge).await {
-                Ok(()) => Ok(won),
-                Err(failure) => Err(failure),
+            won = &mut acquire => {
+                if matches!(won, Won::Failed(_)) {
+                    Ok(won)
+                } else {
+                    gate.wait(ctx.bridge).await.and_then(|decision| release(won, decision))
+                }
             },
         }
     };
@@ -107,10 +135,7 @@ pub(crate) async fn acquire_guarded_attempt(
             // Dropping acquire/the committed relay closes upstream immediately.
             // The guard retains witnessed usage for our cost, while the host
             // applies the input verdict to customer settlement.
-            guard
-                .settle("failed", None, &[], Some(&failure), true)
-                .await;
-            guard.abandon(&failure).await;
+            guard.fail_before_release(&failure).await;
             Won::Failed(collection_public_error(&failure.boundary()))
         }
     }

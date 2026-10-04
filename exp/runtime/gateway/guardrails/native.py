@@ -440,7 +440,10 @@ class NativeGuardrailsMixin:
         """Poll one request-owned input decision without tying up a bridge worker."""
         request_id = str(json.loads(argument).get("request_id") or "")
         entry = self._accounting.entry(request_id)
-        return gate_status(None if entry is None else entry.input_guardrail_gate)
+        if entry is None:
+            return '{"action":"closed"}'
+        status = gate_status(entry.input_guardrail_gate)
+        return status if self._accounting.entry(request_id) is entry else '{"action":"closed"}'
 
     def reopen_guardrail_inspection(
         self: _GuardrailPlane,

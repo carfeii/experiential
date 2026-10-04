@@ -2,6 +2,68 @@ use super::*;
 use pyo3::prelude::*;
 
 #[tokio::test]
+async fn denied_input_retry_keeps_the_meter_without_abandoning_the_attempt() {
+    Python::initialize();
+    let plane = Python::attach(|py| {
+        pyo3::types::PyModule::from_code(py, c"import json\nclass Plane:\n def __init__(self): self.writes = []; self.abandons = []\n def settle(self, argument):\n  self.writes.append(json.loads(argument))\n  raise RuntimeError('temporary ledger failure')\n def abandon(self, argument):\n  self.abandons.append(json.loads(argument))\n  return '{}'\n def close_thread_resources(self, argument): return '{}'\n", c"retry_input_plane.py", c"retry_input_plane")
+            .unwrap().getattr("Plane").unwrap().call0().unwrap().unbind()
+    });
+    let bridge = Arc::new(Bridge::new(Python::attach(|py| plane.clone_ref(py)), 1).unwrap());
+    let mut guard = AttemptGuard::new(
+        bridge.clone(),
+        Arc::new(AtomicUsize::new(0)),
+        "request".into(),
+        Instant::now(),
+    );
+    guard.rebind("attempt".into());
+    guard.mark_dispatched();
+    guard.mark_opened();
+    guard.begin_dial_observation().record(&Event::Usage(Usage {
+        input_tokens: Some(13),
+        output_tokens: Some(7),
+        ..Usage::default()
+    }));
+    let failure = Failure::new(FailureClass::Guardrail, "Input was rejected.");
+    guard.fail_before_release(&failure).await;
+    assert!(!guard.armed);
+    drop(guard);
+    let writes: String = Python::attach(|py| {
+        assert_eq!(
+            plane.bind(py).getattr("abandons").unwrap().len().unwrap(),
+            0
+        );
+        py.import("json")
+            .unwrap()
+            .call_method1("dumps", (plane.bind(py).getattr("writes").unwrap(),))
+            .unwrap()
+            .extract()
+            .unwrap()
+    });
+    let writes: Vec<Value> = serde_json::from_str(&writes).unwrap();
+    assert_eq!(writes.len(), 4);
+    assert!(writes.iter().all(|write| write == &writes[0]));
+    assert_eq!(writes[0]["usage"]["input_tokens"], 13);
+    assert_eq!(writes[0]["usage"]["output_tokens"], 7);
+    assert_eq!(writes[0]["finalize"], true);
+
+    let mut accepted = AttemptGuard::new(
+        bridge,
+        Arc::new(AtomicUsize::new(0)),
+        "request-without-attempt".into(),
+        Instant::now(),
+    );
+    accepted.fail_before_release(&failure).await;
+    drop(accepted);
+    Python::attach(|py| {
+        assert_eq!(
+            plane.bind(py).getattr("abandons").unwrap().len().unwrap(),
+            1
+        );
+        assert_eq!(plane.bind(py).getattr("writes").unwrap().len().unwrap(), 4);
+    });
+}
+
+#[tokio::test]
 async fn parsed_usage_wins_stale_consumer_usage_on_local_failure() {
     Python::initialize();
     let plane = Python::attach(|py| {

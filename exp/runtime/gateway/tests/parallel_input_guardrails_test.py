@@ -19,6 +19,7 @@ import pytest
 
 from exp.common.core.artifacts import JsonObject
 from exp.common.models import BillingSource, GatewayTokenPrices, ModelCapabilities
+from exp.runtime.gateway.budgets import BudgetReservationRejected, BudgetScopeKind
 from exp.runtime.gateway.contracts import GatewayRequest
 from exp.runtime.gateway.guardrails import native as native_guardrails
 from exp.runtime.gateway.guardrails.classifiers import ClassifierRegistry
@@ -40,6 +41,7 @@ from exp.runtime.gateway.lifecycle_test import _configured_gateway
 from exp.runtime.gateway.native_bridge import NativeBridgeError, NativeControlPlane
 from exp.runtime.gateway.native_bridge_test import _admit, _chat_body
 from exp.runtime.gateway.native_server import serve_native_gateway
+from exp.runtime.gateway.rung_admission import RungShed
 from exp.runtime.gateway.tests.mandatory_guardrails_test import _tool_chunk
 from exp.runtime.gateway.tests.native_waterfall_test import (
     _content_chunk,
@@ -91,6 +93,117 @@ def test_customer_funded_deadline_race_terminalizes_accepted_request(
     with sqlite3.connect(components.ledger.database_path) as db:
         assert db.execute("select terminal_state from gateway_requests").fetchall() == [("failed",)]
         assert db.execute("select count(*) from gateway_attempts").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("surface", ["chat", "responses", "messages"])
+@pytest.mark.parametrize("denial", ["quota", "capacity", "internal"])
+def test_predispatch_failure_cancels_input_and_preserves_public_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, surface: str, denial: str
+) -> None:
+    """Even a gate poll winning the race cannot mask a decided admission failure."""
+    classifier = _Classifier("allow")
+    closed_seen = threading.Event()
+    callback_errors: list[Exception] = []
+    _, key = _configured_gateway(
+        tmp_path, base_url="http://127.0.0.1:1/v1", billing_source=BillingSource.HOST_MANAGED
+    )
+    components = load_gateway_components(tmp_path, environment={"TEST_PROVIDER_KEY": "fixture"})
+
+    class Control(NativeControlPlane):
+        """Hold the admission reply until Rust has observed its closed input gate."""
+
+        def start_attempt(self, argument: str) -> str:
+            """Exercise real admission cleanup while enforcing the review's race ordering."""
+            assert classifier.started.wait(2)
+            try:
+                return super().start_attempt(argument)
+            except Exception as exc:
+                callback_errors.append(exc)
+                raise
+            finally:
+                closed_seen.wait(2)
+
+        def guardrail_input_status(self, argument: str) -> str:
+            """Signal when polling discovers that admission already ended."""
+            result = super().guardrail_input_status(argument)
+            if json.loads(result)["action"] == "closed":
+                closed_seen.set()
+            return result
+
+    control = Control(components, guardrails=_engine(classifier))
+    if denial == "capacity":
+        monkeypatch.setattr(
+            control._accounting,
+            "_reserve_rung_slot",  # noqa: SLF001 - scripted capacity boundary.
+            Mock(return_value=RungShed(reason="queue_bound", default_bound=True)),
+        )
+    else:
+        failure = (
+            BudgetReservationRejected(scope_kind=BudgetScopeKind.TEAM, reason="fixture quota")
+            if denial == "quota"
+            else RuntimeError("fixture reservation failure")
+        )
+        monkeypatch.setattr(
+            control._accounting._write_ledger,
+            "start_attempt",  # noqa: SLF001 - synchronous ledger boundary.
+            Mock(side_effect=failure),
+        )
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    ready = threading.Event()
+    stop = exp_gateway_native.shutdown_handle()
+    server = threading.Thread(
+        target=serve_native_gateway,
+        args=(control,),
+        kwargs={
+            "host": "127.0.0.1",
+            "port": port,
+            "shutdown": stop,
+            "on_listening": ready.set,
+            "graceful_timeout_seconds": 0.1,
+        },
+        daemon=True,
+    )
+    server.start()
+    body: JsonObject = {
+        "model": "coding",
+        "stream": True,
+        "max_tokens": 100,
+        "messages": [{"role": "user", "content": "synthetic fixture"}],
+    }
+    path = "/v1/chat/completions"
+    if surface == "responses":
+        body = {"model": "coding", "stream": True, "input": "synthetic fixture"}
+        path = "/v1/responses"
+    elif surface == "messages":
+        path = "/v1/messages"
+    try:
+        assert ready.wait(5)
+        response = httpx.post(
+            f"http://127.0.0.1:{port}{path}",
+            headers={"authorization": f"Bearer {key}"},
+            json=body,
+            timeout=5,
+        )
+        assert response.status_code == (500 if denial == "internal" else 429), (
+            response.text,
+            callback_errors,
+        )
+        assert "Content inspection is unavailable" not in response.text
+        if denial == "quota":
+            assert "monthly gateway allocation is exhausted" in response.text
+        assert closed_seen.is_set()
+        assert classifier.cancelled.wait(2), "orphaned classifier continued after admission ended"
+        with sqlite3.connect(components.ledger.database_path) as db:
+            assert db.execute("select terminal_state from gateway_requests").fetchall() == [
+                ("failed",)
+            ]
+            assert db.execute("select count(*) from gateway_attempts").fetchone() == (0,)
+    finally:
+        classifier.release.set()
+        stop.request_shutdown()
+        server.join(timeout=5)
 
 
 class _Classifier:
