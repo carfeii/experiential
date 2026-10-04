@@ -67,7 +67,7 @@ from exp.runtime.gateway.recovery import (
 from exp.runtime.gateway.recovery_test import Clock, eligible
 from exp.runtime.gateway.reservation_tokenizer import reservation_encoder
 from exp.runtime.gateway.routing import GatewayRoute
-from exp.runtime.gateway.rung_admission import RungLoadKey, RungLoadRegistry, RungShed
+from exp.runtime.gateway.rung_admission import RungLoadKey, RungLoadRegistry, RungShed, _RungLoad
 from exp.runtime.openai_protocol.errors import (
     THROTTLED_RETRY_AFTER_SECONDS,
     public_failure_error,
@@ -1851,6 +1851,22 @@ class TestLaneSaturation:
         capped = _start(registry, ordinal=0, request_id=request_ids[4])
         assert capped["exhausted"] is True
         assert cast("JsonObject", capped["failure"])["failure_class"] == "throttled"
+
+    def test_priority_rate_shed_on_a_default_bound_rung_admits_without_looping(self) -> None:
+        """A learned-rate shed on an unauthored rung overflows once for Pro, like for free."""
+        ledger = _RecordingLedger()
+        registry = NativeAttemptAccounting(ledger, default_lane_bound=4)
+        only = (_deployment("deployment-a", connection_sha256="b" * 64),)
+        _admit(registry, only, request_id="request-pro", priority_admission=2)
+        key = (only[0].deployment_id, only[0].connection_sha256)
+        with registry.loads._lock:  # noqa: SLF001 - seed a learned ceiling
+            rung = registry.loads._rungs.setdefault(key, _RungLoad())  # noqa: SLF001
+            rung.learned_rpm = 0.5
+            rung.window.append((time.monotonic(), 0))
+            rung.window_requests = 1
+        started = _start(registry, ordinal=0, request_id="request-pro")
+        assert started["route_depth"] == 0
+        assert len(ledger.started) == 1
 
 
 @pytest.mark.parametrize(

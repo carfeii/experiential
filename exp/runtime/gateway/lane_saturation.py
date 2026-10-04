@@ -164,7 +164,7 @@ def overflow_target(
         # retried, so the walk ends in a refusal once every rung is capped.
         # Only a CAPACITY shed earns the priority exception: a rate-window
         # shed keeps the free caller's rule (a selected route never overflows
-        # it), since forcing it would bypass the authored rate cap.
+        # it), so priority never forces a rate cap the free rule would refuse.
         for depth, _reason in policy_sheds:
             shed = shed_records.get(depth)
             if shed is not None and shed.overflow_ceiling:

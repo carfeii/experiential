@@ -299,10 +299,12 @@ class RungLoadRegistry:
             # fractional ceiling floors: 1.5x a bound of 5 holds 7, never 8.
             if force and overflow_ceiling is not None and rung.total + 1 > overflow_ceiling:
                 return RungShed("queue_bound", overflow_ceiling=True)
-            # A priority overflow (a ceiling) is forced past capacity only: its
-            # capacity is the ceiling checked above, and the rate windows still
-            # apply unless this is a scheduled rate redial.
-            if not force or rate_retry or overflow_ceiling is not None:
+            # A forced admission skips the soft limits exactly as the free
+            # caller's historical overflow does (a priority overflow's only
+            # extra limit is the ceiling above), so a forced retry can never
+            # shed on the same window again and loop; a scheduled rate redial
+            # rechecks the rate windows (a priority one against its ceiling).
+            if not force or rate_retry:
                 shed = self._shed_reason(
                     rung,
                     organization,
