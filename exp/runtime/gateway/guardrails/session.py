@@ -63,7 +63,8 @@ class GuardrailSession:
     deadline_monotonic: float
     detectors: Mapping[str, NativeDetector] = field(default_factory=dict, repr=False)
     _input: Future[None] | None = field(default=None, init=False, repr=False)
-    _input_approved: bool = field(default=False, init=False, repr=False)
+    _input_failure: GatewayFailure | None = field(default=None, init=False, repr=False)
+    _input_approved_at: float | None = field(default=None, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
     _inspected: list[tuple[GatewayRequest, GatewayRequest]] = field(
         default_factory=list, init=False, repr=False
@@ -87,14 +88,22 @@ class GuardrailSession:
         """Validate original intent and every rewrite through the same input executor."""
         if self._closed:
             raise GuardrailRejected(denied_input_failure())
+        if self._input_failure is not None:
+            raise GuardrailRejected(self._input_failure)
         if defer:
             return request
         for subject, result in self._inspected:
             if subject == request:
                 return result
-        self._input_approved = False
-        result = run_on_native_loop(self._inspect_input(request))
-        self._input_approved = True
+        self._input_approved_at = None
+        try:
+            result = run_on_native_loop(self._inspect_input(request))
+            self._input_approved_at = time.monotonic()
+            if not self._approved_before_deadline():
+                raise GuardrailRejected(denied_input_failure())
+        except GuardrailRejected as exc:
+            self._input_failure = denied_input_failure(exc.failure)
+            raise
         self._inspected.append((request, result))
         if result != request:
             self._inspected.append((result, result))
@@ -142,6 +151,8 @@ class GuardrailSession:
         """Finish admission or start one approval task before any upstream attempt."""
         if self._closed:
             raise GuardrailRejected(denied_input_failure())
+        if self._input_failure is not None:
+            raise GuardrailRejected(self._input_failure)
         remaining: list[GatewayRequest] = []
         for subject in subjects:
             if subject not in remaining and not any(subject == old for old, _ in self._inspected):
@@ -152,7 +163,7 @@ class GuardrailSession:
             raise RuntimeError("guardrail input execution already started")
         if overlap and not all(self.can_overlap_input(subject) for subject in remaining):
             raise RuntimeError("guardrail input cannot overlap this request")
-        self._input_approved = False
+        self._input_approved_at = None
         self._input = start_on_native_loop(self._inspect_subjects(tuple(remaining)))
         if not overlap:
             try:
@@ -161,7 +172,10 @@ class GuardrailSession:
                 failure = self.settlement_failure() or denied_input_failure()
                 self.cancel()
                 raise GuardrailRejected(failure) from None
-            self._input_approved = True
+            failure = self.settlement_failure()
+            if failure is not None:
+                self.cancel()
+                raise GuardrailRejected(failure)
             self._input = None
 
     async def _inspect_subjects(self, subjects: tuple[GatewayRequest, ...]) -> None:
@@ -172,6 +186,14 @@ class GuardrailSession:
                 # A provider-bound request must never change after route planning.
                 raise GuardrailRejected(denied_input_failure())
             self._inspected.append((subject, result))
+        self._input_approved_at = time.monotonic()
+
+    def _approved_before_deadline(self) -> bool:
+        """Retain timely approval across late settlement without accepting a late verdict."""
+        return not any(p.input_checks for p in self.policies) or (
+            self._input_approved_at is not None
+            and self._input_approved_at < self.deadline_monotonic
+        )
 
     @property
     def input_pending(self) -> bool:
@@ -181,11 +203,9 @@ class GuardrailSession:
     def input_decision(self) -> JsonObject:
         """Poll approval without tying up a bridge worker or renewing its deadline."""
         future = self._input
-        if self._closed or (
-            future is None
-            and not self._input_approved
-            and any(p.input_checks for p in self.policies)
-        ):
+        if self._input_failure is not None:
+            return {"action": "error", "failure": self._input_failure.model_dump(mode="json")}
+        if self._closed or (future is None and not self._approved_before_deadline()):
             return {"action": "error", "failure": denied_input_failure().model_dump(mode="json")}
         if future is None:
             return {"action": "allow"}
@@ -200,7 +220,9 @@ class GuardrailSession:
         except Exception:  # noqa: BLE001 - detector diagnostics never cross the public boundary.
             failure = denied_input_failure()
         else:
-            return {"action": "allow"}
+            if self._approved_before_deadline():
+                return {"action": "allow"}
+            failure = denied_input_failure()
         return {"action": "error", "failure": failure.model_dump(mode="json")}
 
     def settlement_failure(self) -> GatewayFailure | None:

@@ -348,3 +348,43 @@ def test_policy_changes_cannot_remove_an_admitted_check() -> None:
     assert engine.open_request(_authorization(), deadline_monotonic=time.monotonic() + 3) is None
     with pytest.raises(GuardrailRejected):
         session.inspect_input(_request())
+
+
+@pytest.mark.parametrize("outcome", ["block", "error"])
+def test_serial_input_rejection_retains_its_verdict_for_settlement(outcome: str) -> None:
+    """A rejected search expansion settles the actual verdict and cannot be retried in place."""
+    detector = _Classifier(outcome)
+    detector.release.set()
+    session = _session(_engine(detector))
+    with pytest.raises(GuardrailRejected) as exc:
+        session.inspect_input(_request())
+    failure = session.settlement_failure()
+    assert failure is not None
+    assert failure.failure_class == exc.value.failure.failure_class
+    assert failure.safe_message == exc.value.failure.safe_message
+    assert failure.safe_details["input_guardrail_denied"] is True
+    with pytest.raises(GuardrailRejected):
+        session.prepare_dispatch((_request("another subject"),), overlap=True)
+    assert len(detector.requests) == 1
+
+
+@pytest.mark.parametrize("approved_before_deadline", [True, False])
+def test_completed_future_settlement_uses_verdict_time_not_poll_time(
+    approved_before_deadline: bool,
+) -> None:
+    """A late allow cannot charge the caller; a timely allow stays valid during late settlement."""
+    session = _session(_engine(_Classifier("allow")))
+    session.deadline_monotonic = time.monotonic() - 1
+    future: Future[None] = Future()
+    session._input = future
+    session._input_approved_at = session.deadline_monotonic + (
+        -0.01 if approved_before_deadline else 0.01
+    )
+    future.set_result(None)
+    failure = session.settlement_failure()
+    assert session.input_decision()["action"] == ("allow" if approved_before_deadline else "error")
+    if approved_before_deadline:
+        assert failure is None
+    else:
+        assert failure is not None
+        assert failure.safe_details["input_guardrail_denied"] is True
