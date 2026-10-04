@@ -7,9 +7,11 @@ classification reads only request headers the caller already sends: ``User-Agent
 reads the request body, and it never treats a caller-chosen label as a credential or an
 authorization input: an app id is reporting metadata only.
 
-The vocabulary is closed. A header that matches no known application classifies as ``None``
-(reported as an unidentified app), never as a guessed name, so a new agent appears in reports
-only after its rule is added here.
+The vocabulary is closed. Named applications come first; a caller none of them recognizes is
+then named by its caller kind (an OpenAI, Anthropic or Vercel AI SDK, a browser, curl, or custom
+code on a generic HTTP library), and only a caller with no recognizable header at all
+classifies as ``None`` (reported as unidentified). A new agent appears in reports under its own
+name only after its rule is added here.
 """
 
 from __future__ import annotations
@@ -50,6 +52,18 @@ class ClientApp(StrEnum):
     CHATBOX = "chatbox"
     N8N = "n8n"
     LITELLM = "litellm"
+    OH_MY_PI = "oh_my_pi"
+    WORKBUDDY = "workbuddy"
+    OMNI_COPILOT = "omni_copilot"
+    CLI_PROXY_API = "cli_proxy_api"
+    OPENAI_AGENTS_SDK = "openai_agents_sdk"
+    # Caller kinds: the fallback for a caller no named application matches.
+    OPENAI_SDK = "openai_sdk"
+    ANTHROPIC_SDK = "anthropic_sdk"
+    VERCEL_AI_SDK = "vercel_ai_sdk"
+    BROWSER = "browser"
+    CURL = "curl"
+    CUSTOM_CODE = "custom_code"
 
 
 # Display label of every application, the one place a report reads its name from.
@@ -72,6 +86,17 @@ CLIENT_APP_LABELS: dict[ClientApp, str] = {
     ClientApp.CHATBOX: "Chatbox",
     ClientApp.N8N: "n8n",
     ClientApp.LITELLM: "LiteLLM",
+    ClientApp.OH_MY_PI: "oh-my-pi",
+    ClientApp.WORKBUDDY: "WorkBuddy",
+    ClientApp.OMNI_COPILOT: "OmniCopilot",
+    ClientApp.CLI_PROXY_API: "CLIProxyAPI",
+    ClientApp.OPENAI_AGENTS_SDK: "OpenAI Agents SDK",
+    ClientApp.OPENAI_SDK: "OpenAI SDK",
+    ClientApp.ANTHROPIC_SDK: "Anthropic SDK",
+    ClientApp.VERCEL_AI_SDK: "Vercel AI SDK",
+    ClientApp.BROWSER: "Browser",
+    ClientApp.CURL: "curl",
+    ClientApp.CUSTOM_CODE: "Custom code",
 }
 
 # Ordered: the first matching rule wins. Hermes precedes Claude Code because Hermes's gateway
@@ -89,12 +114,36 @@ _USER_AGENT_RULES: tuple[tuple[ClientApp, re.Pattern[str]], ...] = (
     (ClientApp.GEMINI_CLI, re.compile(r"^gemini-?cli/")),
     (ClientApp.GITHUB_COPILOT, re.compile(r"^githubcopilotchat/")),
     (ClientApp.ZED, re.compile(r"^zed/")),
-    (ClientApp.PI, re.compile(r"^pi(?:/|$)")),
+    (ClientApp.PI, re.compile(r"^pi(?:/|$| \()")),
     (ClientApp.OPENCLAW, re.compile(r"\bopenclaw\b")),
     (ClientApp.CHERRY_STUDIO, re.compile(r"\bcherrystudio/")),
     (ClientApp.CHATBOX, re.compile(r"\bchatboxapp\b")),
     (ClientApp.N8N, re.compile(r"^n8n\b")),
     (ClientApp.LITELLM, re.compile(r"^litellm/")),
+    (ClientApp.OH_MY_PI, re.compile(r"^omp/")),
+    (ClientApp.WORKBUDDY, re.compile(r"^workbuddy/")),
+    (ClientApp.OMNI_COPILOT, re.compile(r"^omnicopilot\b")),
+    (ClientApp.CLI_PROXY_API, re.compile(r"^cli-proxy-openai-compat\b|^(?:easy)?cliproxyapi/")),
+    (ClientApp.OPENAI_AGENTS_SDK, re.compile(r"^agents/python\b")),
+)
+
+# Read only after every named-application signal (User-Agent, originator, X-Title,
+# HTTP-Referer) failed: an SDK or HTTP library names the caller's kind, never its product.
+_CALLER_KIND_RULES: tuple[tuple[ClientApp, re.Pattern[str]], ...] = (
+    (ClientApp.OPENAI_SDK, re.compile(r"^(?:async)?openai(?:client\w*)?/")),
+    (ClientApp.ANTHROPIC_SDK, re.compile(r"^(?:async)?anthropic/")),
+    (ClientApp.VERCEL_AI_SDK, re.compile(r"\bai-sdk/")),
+    (ClientApp.BROWSER, re.compile(r"^mozilla/5\.0 \(.*\) (?:applewebkit|gecko)/")),
+    (ClientApp.CURL, re.compile(r"^curl/")),
+    (
+        ClientApp.CUSTOM_CODE,
+        re.compile(
+            r"^(?:node(?:$|/)|undici\b|node-fetch/|bun/|deno/|go-http-client/|python-urllib/"
+            r"|python-httpx/|python-requests/|python/[\d.]+ aiohttp/|aiohttp/|axios/|okhttp/"
+            r"|guzzlehttp/|fasthttp$|java/|dart/|reqwest/|ruby$|faraday |mozilla/5\.0$)"
+            r"|\bpowershell/"
+        ),
+    ),
 )
 
 _TITLE_APPS: dict[str, ClientApp] = {
@@ -177,7 +226,8 @@ def classify_client_app(
     """Classify the calling application from content-free request headers.
 
     ``User-Agent`` is the most specific signal, then Codex's ``originator``, then the
-    OpenRouter-style ``X-Title`` and ``HTTP-Referer`` app identity.
+    OpenRouter-style ``X-Title`` and ``HTTP-Referer`` app identity, and last the caller kind
+    an SDK or HTTP library ``User-Agent`` names.
 
     Args:
         user_agent: ``User-Agent`` header value.
@@ -200,8 +250,12 @@ def classify_client_app(
     if title is not None and title in _TITLE_APPS:
         return _TITLE_APPS[title]
     referer = _inspected(app_referer)
-    if referer is not None:
-        return _referer_app(referer)
+    if referer is not None and (app := _referer_app(referer)) is not None:
+        return app
+    if agent is not None:
+        for kind, pattern in _CALLER_KIND_RULES:
+            if pattern.search(agent):
+                return kind
     return None
 
 

@@ -5233,7 +5233,8 @@ def test_admit_classifies_and_persists_the_calling_app(tmp_path: Path) -> None:
     for label, headers in {
         "claude": {"user_agent": "claude-cli/2.1.278 (external, cli)"},
         "hermes": {"user_agent": "OpenAI/Python 2.8.1", "app_title": "Hermes Agent"},
-        "unknown": {"user_agent": "python-httpx/0.28.1"},
+        "custom code": {"user_agent": "python-httpx/0.28.1"},
+        "unknown": {"user_agent": "pilot/1.0"},
         "absent": {},
     }.items():
         admission = json.loads(
@@ -5258,7 +5259,8 @@ def test_admit_classifies_and_persists_the_calling_app(tmp_path: Path) -> None:
     assert rows == {
         "claude": ("claude_code", "claude-cli/2.1.278 (external, cli)"),
         "hermes": ("hermes", "OpenAI/Python 2.8.1"),
-        "unknown": (None, "python-httpx/0.28.1"),
+        "custom code": ("custom_code", "python-httpx/0.28.1"),
+        "unknown": (None, "pilot/1.0"),
         "absent": (None, None),
     }
 

@@ -38,6 +38,17 @@ from exp.runtime.gateway.client_apps import (
         ("Zed/1.18.1+stable.352 (windows; x86_64)", ClientApp.ZED),
         ("pi/1.0", ClientApp.PI),
         ("pi", ClientApp.PI),
+        ("pi (win32 10.0.26200; x64)", ClientApp.PI),
+        ("pi (linux 6.6.87.2-microsoft-standard-WSL2; x64)", ClientApp.PI),
+        ("omp/18.6.0", ClientApp.OH_MY_PI),
+        ("WorkBuddy/5.5.2 WorkBuddy/5.5.2 CLI/2.137.1", ClientApp.WORKBUDDY),
+        ("OmniCopilot-VSCode", ClientApp.OMNI_COPILOT),
+        ("cli-proxy-openai-compat", ClientApp.CLI_PROXY_API),
+        (
+            "EasyCLIProxyAPI/0.3.11 (+https://github.com/router-for-me/EasyCLIProxyAPI)",
+            ClientApp.CLI_PROXY_API,
+        ),
+        ("Agents/Python 0.19.0", ClientApp.OPENAI_AGENTS_SDK),
         ("OpenClaw/2026.9.1", ClientApp.OPENCLAW),
         (
             "Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 CherryStudio/1.7.15 Chrome/140",
@@ -54,24 +65,75 @@ def test_known_user_agents_classify(user_agent: str, expected: ClientApp) -> Non
 
 
 @pytest.mark.parametrize(
+    ("user_agent", "expected"),
+    [
+        ("OpenAI/Python 2.8.1", ClientApp.OPENAI_SDK),
+        ("AsyncOpenAI/Python 2.8.1", ClientApp.OPENAI_SDK),
+        ("OpenAI/JS 5.0.1", ClientApp.OPENAI_SDK),
+        ("OpenAIClientAsyncImpl/Java unknown", ClientApp.OPENAI_SDK),
+        ("Anthropic/JS 0.90.0", ClientApp.ANTHROPIC_SDK),
+        ("ai/6.0.185 ai-sdk/provider-utils/4.0.50 runtime/node.js/24", ClientApp.VERCEL_AI_SDK),
+        (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0.0.0 Safari/537.36",
+            ClientApp.BROWSER,
+        ),
+        (
+            "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
+            ClientApp.BROWSER,
+        ),
+        ("curl/8.7.1", ClientApp.CURL),
+        ("node", ClientApp.CUSTOM_CODE),
+        ("undici", ClientApp.CUSTOM_CODE),
+        ("Bun/1.4.2", ClientApp.CUSTOM_CODE),
+        ("Go-http-client/2.0", ClientApp.CUSTOM_CODE),
+        ("python-httpx/0.28.1", ClientApp.CUSTOM_CODE),
+        ("python-requests/2.34.2", ClientApp.CUSTOM_CODE),
+        ("Python-urllib/3.14", ClientApp.CUSTOM_CODE),
+        ("Python/3.14 aiohttp/3.14.3", ClientApp.CUSTOM_CODE),
+        ("axios/1.17.0", ClientApp.CUSTOM_CODE),
+        ("okhttp/4.12.0", ClientApp.CUSTOM_CODE),
+        ("GuzzleHttp/7", ClientApp.CUSTOM_CODE),
+        ("Mozilla/5.0", ClientApp.CUSTOM_CODE),
+        (
+            "Mozilla/5.0 (Windows NT 10.0; Microsoft Windows 10.0.26200; en-US) PowerShell/7.6.6",
+            ClientApp.CUSTOM_CODE,
+        ),
+    ],
+)
+def test_sdks_and_http_libraries_name_the_caller_kind(user_agent: str, expected: ClientApp) -> None:
+    """A caller no named application matches is reported by the kind its library names."""
+    assert classify_client_app(user_agent=user_agent) is expected
+
+
+@pytest.mark.parametrize(
     "user_agent",
     [
         None,
         "",
         "   ",
-        "OpenAI/Python 2.8.1",
-        "node",
-        "Go-http-client/2.0",
-        "python-httpx/0.28.1",
         "codex-router/0.4.0-beta.4",
         "hermes-free-audit/0.2",
         "pilot/1.0",
-        "Anthropic/JS 0.90.0",
+        "nodemon-proxy/1.0",
+        "Mozilla/5.0 (compatible; ChatClient/1.0)",
     ],
 )
-def test_generic_clients_stay_unclassified(user_agent: str | None) -> None:
-    """SDKs, proxies and look-alike names never become a guessed application."""
+def test_unrecognized_clients_stay_unclassified(user_agent: str | None) -> None:
+    """Look-alike names and unknown tools are never guessed into an application or kind."""
     assert classify_client_app(user_agent=user_agent) is None
+
+
+def test_named_signals_win_over_the_caller_kind() -> None:
+    """X-Title, HTTP-Referer and originator name the app even behind an SDK User-Agent."""
+    assert classify_client_app(user_agent="OpenAI/JS 5.0", app_title="Cline") is ClientApp.CLINE
+    assert (
+        classify_client_app(user_agent="node", app_referer="https://kilocode.ai")
+        is ClientApp.KILO_CODE
+    )
+    assert classify_client_app(user_agent="node", app_referer="https://example.com") is (
+        ClientApp.CUSTOM_CODE
+    )
 
 
 def test_user_agent_wins_over_other_signals() -> None:
@@ -98,11 +160,11 @@ def test_originator_identifies_codex_behind_a_generic_user_agent() -> None:
         ("Hermes Agent", ClientApp.HERMES),
         ("  kilo code ", ClientApp.KILO_CODE),
         ("OpenClaw", ClientApp.OPENCLAW),
-        ("My Internal Tool", None),
+        ("My Internal Tool", ClientApp.OPENAI_SDK),
     ],
 )
 def test_app_title_classifies_known_names(title: str, expected: ClientApp | None) -> None:
-    """The OpenRouter X-Title header classifies exact known application names only."""
+    """X-Title names a known app exactly; any other title leaves the SDK caller kind."""
     assert classify_client_app(user_agent="OpenAI/Python 2.8.1", app_title=title) is expected
 
 

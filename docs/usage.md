@@ -184,8 +184,9 @@ counts, token usage, latency, terminal states, and attributed estimated cost. Th
 terminal states across `host_managed` and `customer_managed`; logical request counts are not
 partitioned. `by_client_app` attributes each request to the calling app (Claude Code, Codex,
 OpenCode, Hermes Agent, and the rest of `exp.runtime.gateway.client_apps.ClientApp`), classified
-from the `User-Agent`, Codex `originator`, `X-Title`, and `HTTP-Referer` headers; callers no rule
-recognizes report as unidentified. Estimated cost is not provider invoice cost.
+from the `User-Agent`, Codex `originator`, `X-Title`, and `HTTP-Referer` headers. A caller no
+app rule names is reported by its caller kind (OpenAI, Anthropic or Vercel AI SDK, browser, curl,
+or custom code); only one with no recognizable header reports as unidentified. Estimated cost is not provider invoice cost.
 
 One-time virtual-key material appears only in the successful key-issue receipt or a newly created
 mode-`0600` output file. Human key issuance on a non-terminal requires `--json` or `--output`.

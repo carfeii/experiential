@@ -24,6 +24,7 @@ from unittest.mock import Mock
 from click import unstyle
 
 from exp.common.core.artifacts import canonical_json_bytes
+from exp.runtime.gateway.client_apps import CLIENT_APP_LABELS, ClientApp
 
 if sys.platform != "win32":
     import fcntl
@@ -2267,16 +2268,17 @@ def _installed_release_driver() -> None:
                 ),
             )
         )
-        # The released CLI sends no app headers, so every request is one unidentified app row.
+        # The test drives the gateway with the OpenAI SDK and plain httpx, which carry no app
+        # identity, so every request lands under one of those two caller kinds.
         app_buckets = usage_payload["by_client_app"]
-        assert [bucket["client_app"] for bucket in app_buckets] == [None]
-        assert app_buckets[0]["requests"] == identity_usage["requests"]
-        assert app_buckets[0]["attempts"] == identity_usage["attempts"]
+        assert {bucket["client_app"] for bucket in app_buckets} <= {"openai_sdk", "custom_code"}
+        assert sum(bucket["requests"] for bucket in app_buckets) == identity_usage["requests"]
+        assert sum(bucket["attempts"] for bucket in app_buckets) == identity_usage["attempts"]
         expected_app_cells = tuple(
             value
             for bucket in app_buckets
             for value in (
-                "Unidentified app",
+                CLIENT_APP_LABELS[ClientApp(bucket["client_app"])],
                 bucket["requests"],
                 bucket["attempts"],
                 bucket["input_tokens"],
