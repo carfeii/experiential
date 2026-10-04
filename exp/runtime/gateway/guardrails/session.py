@@ -13,10 +13,12 @@ from exp.runtime.gateway.contracts import GatewayFailure, GatewayFailureClass, G
 from exp.runtime.gateway.guardrails.bounded import run_on_native_loop, start_on_native_loop
 from exp.runtime.gateway.guardrails.contracts import (
     GuardrailAction,
+    GuardrailCheckStage,
     GuardrailCompletion,
     GuardrailPolicy,
     GuardrailRejected,
     OutputGuardrailMode,
+    guardrail_failure,
 )
 from exp.runtime.gateway.guardrails.deterministic import (
     NativeDetector,
@@ -109,42 +111,67 @@ class GuardrailSession:
             self._inspected.append((result, result))
         return result
 
-    async def _input_chain(self, request: GatewayRequest, *, modifying: bool) -> GatewayRequest:
-        """Run one phase for all scopes using the same native or bounded adapter strategy."""
-        current = request
+    def _phase_policies(
+        self, stage: GuardrailCheckStage, *, modifying: bool
+    ) -> tuple[GuardrailPolicy, ...]:
+        """Separate modifiers so each earlier constraint can validate the final subject."""
+        result: list[GuardrailPolicy] = []
         for policy in self.policies:
             checks = tuple(
-                c for c in policy.input_checks if (c.action is GuardrailAction.MODIFY) == modifying
+                c
+                for c in policy.checks
+                if c.stage is stage and (c.action is GuardrailAction.MODIFY) == modifying
             )
-            if not checks:
-                continue
-            bound = policy.model_copy(update={"checks": checks})
-            native = (
-                native_input_request(
-                    bound,
-                    self.detectors,
-                    current,
-                    monotonic=time.monotonic,
-                    deadline_monotonic=self.deadline_monotonic,
-                )
-                if self.detectors
-                else None
+            if modifying:
+                result.extend(policy.model_copy(update={"checks": (c,)}) for c in checks)
+            elif checks:
+                result.append(policy.model_copy(update={"checks": checks}))
+        return tuple(result)
+
+    async def _enforce_input(
+        self, policy: GuardrailPolicy, request: GatewayRequest
+    ) -> GatewayRequest:
+        """Apply the same native or bounded adapter strategy during execution and validation."""
+        native = (
+            native_input_request(
+                policy,
+                self.detectors,
+                request,
+                monotonic=time.monotonic,
+                deadline_monotonic=self.deadline_monotonic,
             )
-            current = (
-                native
-                if native is not None
-                else await self.engine.enforce_input(
-                    policy=bound, request=current, deadline_monotonic=self.deadline_monotonic
-                )
+            if self.detectors
+            else None
+        )
+        return (
+            native
+            if native is not None
+            else await self.engine.enforce_input(
+                policy=policy, request=request, deadline_monotonic=self.deadline_monotonic
             )
-        return current
+        )
 
     async def _inspect_input(self, request: GatewayRequest) -> GatewayRequest:
-        """Check before rewriting, then recheck the exact provider-bound result."""
-        await self._input_chain(request, modifying=False)
-        result = await self._input_chain(request, modifying=True)
+        """Require the final rewrite to preserve every preceding check's constraint."""
+        checks = self._phase_policies(GuardrailCheckStage.INPUT, modifying=False)
+        modifiers = self._phase_policies(GuardrailCheckStage.INPUT, modifying=True)
+        for policy in checks:
+            await self._enforce_input(policy, request)
+        result = request
+        for policy in modifiers:
+            result = await self._enforce_input(policy, result)
+        # Validate each prior modifier against the SAME final subject. Replaying
+        # the whole chain could hide an undo, including a rewrite back to the original.
+        for policy in modifiers[:-1]:
+            if await self._enforce_input(policy, result) != result:
+                raise GuardrailRejected(
+                    guardrail_failure(
+                        action=GuardrailAction.BLOCK, check_id=policy.checks[0].check_id
+                    )
+                )
         if result != request:
-            await self._input_chain(result, modifying=False)
+            for policy in checks:
+                await self._enforce_input(policy, result)
         return result
 
     def prepare_dispatch(self, subjects: Sequence[GatewayRequest], *, overlap: bool) -> None:
@@ -275,7 +302,12 @@ class GuardrailSession:
         if len(policies) != 1:
             return None
         actions = {check.action is GuardrailAction.MODIFY for check in policies[0].output_checks}
-        return None if len(actions) > 1 else native_output_plan(policies[0], self.detectors)
+        modifiers = sum(c.action is GuardrailAction.MODIFY for c in policies[0].output_checks)
+        return (
+            None
+            if len(actions) > 1 or modifiers > 1
+            else native_output_plan(policies[0], self.detectors)
+        )
 
     def inspect_output(self, completion: GuardrailCompletion) -> GuardrailCompletion:
         """Enforce every output policy before releasing a buffered completion."""
@@ -291,29 +323,33 @@ class GuardrailSession:
             raise GuardrailRejected(failure)
         return run_on_native_loop(self._inspect_output(completion))
 
-    async def _output_chain(
-        self, completion: GuardrailCompletion, *, modifying: bool
+    async def _enforce_output(
+        self, policy: GuardrailPolicy, completion: GuardrailCompletion
     ) -> GuardrailCompletion:
-        """Inspect or rewrite output through the same ordered policy executor."""
-        current = completion
-        for policy in self.output_policies:
-            checks = tuple(
-                c for c in policy.output_checks if (c.action is GuardrailAction.MODIFY) == modifying
-            )
-            if checks:
-                current = await self.engine.enforce_output(
-                    policy=policy.model_copy(update={"checks": checks}),
-                    completion=current,
-                    deadline_monotonic=self.deadline_monotonic,
-                )
-        return current
+        """Use the shared output executor for both rewrites and their final validation."""
+        return await self.engine.enforce_output(
+            policy=policy, completion=completion, deadline_monotonic=self.deadline_monotonic
+        )
 
     async def _inspect_output(self, completion: GuardrailCompletion) -> GuardrailCompletion:
-        """Validate original output and any rewrite before release."""
-        await self._output_chain(completion, modifying=False)
-        result = await self._output_chain(completion, modifying=True)
+        """Require every earlier check to accept the exact completion that will be released."""
+        checks = self._phase_policies(GuardrailCheckStage.OUTPUT, modifying=False)
+        modifiers = self._phase_policies(GuardrailCheckStage.OUTPUT, modifying=True)
+        for policy in checks:
+            await self._enforce_output(policy, completion)
+        result = completion
+        for policy in modifiers:
+            result = await self._enforce_output(policy, result)
+        for policy in modifiers[:-1]:
+            if await self._enforce_output(policy, result) != result:
+                raise GuardrailRejected(
+                    guardrail_failure(
+                        action=GuardrailAction.BLOCK, check_id=policy.checks[0].check_id
+                    )
+                )
         if result != completion:
-            await self._output_chain(result, modifying=False)
+            for policy in checks:
+                await self._enforce_output(policy, result)
         return result
 
     def release_output_segment(

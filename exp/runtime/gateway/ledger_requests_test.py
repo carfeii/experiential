@@ -29,6 +29,7 @@ def test_historical_zero_attempt_failure_migrates_without_a_certificate(tmp_path
     ledger.finish_request(authorization=original, failure=failure)
     close_idle_connections()
     with sqlite3.connect(tmp_path / "gateway.db") as connection:
+        connection.execute("ALTER TABLE gateway_requests DROP COLUMN web_search_requests")
         connection.execute("ALTER TABLE gateway_requests DROP COLUMN user_agent")
         connection.execute("ALTER TABLE gateway_requests DROP COLUMN client_app")
         connection.execute("ALTER TABLE gateway_requests DROP COLUMN failed_without_effects")
@@ -89,3 +90,35 @@ def test_certificate_requires_direct_target_and_failed_terminal_state(
         )
         is False
     )
+
+
+def test_unattempted_search_meter_is_durable_idempotent_and_never_certifies_free_work(
+    tmp_path: Path,
+) -> None:
+    """Retain the search expense without inventing a model dispatch or customer charge."""
+    clock = FakeLedgerClock()
+    store, ledger, key = _authority_fixture(tmp_path, clock)
+    authorization = store.authorize_request(
+        raw_key=key,
+        alias="coding",
+        request=_request("search result"),
+        deadline_monotonic=clock.monotonic() + 30,
+    )
+    ledger.accept_request(authorization=authorization)
+    failure = GatewayFailure(failure_class=GatewayFailureClass.GUARDRAIL, safe_message="blocked")
+    for _ in range(2):
+        assert (
+            ledger.finish_request(
+                authorization=authorization,
+                failure=failure,
+                certify_no_effects=True,
+                web_search_requests=1,
+            )
+            is False
+        )
+    with sqlite3.connect(ledger.database_path) as connection:
+        assert connection.execute(
+            "SELECT terminal_state, web_search_requests, failed_without_effects "
+            "FROM gateway_requests"
+        ).fetchall() == [("failed", 1, 0)]
+        assert connection.execute("SELECT count(*) FROM gateway_attempts").fetchone() == (0,)

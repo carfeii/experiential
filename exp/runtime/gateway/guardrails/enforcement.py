@@ -97,7 +97,12 @@ class GuardrailEngine:
 
     def revision_for(self, authorization: AuthorizationSnapshot) -> str | None:
         """Bind replay to the full applicable policy, adapter, and execution configuration."""
-        policies = self.policies_for(authorization.organization_id, authorization.identity_id)
+        return self.policy_revision(
+            self.policies_for(authorization.organization_id, authorization.identity_id)
+        )
+
+    def policy_revision(self, policies: tuple[GuardrailPolicy, ...]) -> str | None:
+        """Hash an already frozen policy snapshot without consulting the live store again."""
         return (
             None
             if not policies
@@ -424,7 +429,9 @@ class GuardrailEngine:
                 raise GuardrailRejected(
                     guardrail_failure(action=GuardrailAction.ERROR, check_id=check.check_id)
                 )
-            return completion.model_copy(update={"text": verdict.replacement_text, "context": ()})
+            return completion.model_copy(
+                update={"text": verdict.replacement_text, "context": (), "refusal": False}
+            )
         raise GuardrailRejected(guardrail_failure(action=check.action, check_id=check.check_id))
 
     def _record(

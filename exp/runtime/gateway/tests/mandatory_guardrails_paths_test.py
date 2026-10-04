@@ -220,6 +220,9 @@ def test_precommit_and_synthesized_output_is_inspected_before_settlement(
             assert connection.execute(
                 "select terminal_state, terminal_at is not null from gateway_requests"
             ).fetchall() == [("failed", 1)]
+            assert connection.execute(
+                "select web_search_requests from gateway_requests"
+            ).fetchall() == [(1 if blocked_input else 0,)]
     finally:
         provider.shutdown()
         provider.server_close()

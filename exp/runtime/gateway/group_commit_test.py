@@ -612,6 +612,7 @@ def test_zero_attempt_certificate_waits_for_committed_terminal_state(
             "authorization": authorization,
             "failure": failure,
             "certify_no_effects": True,
+            "web_search_requests": 0,
         }
         result = original(
             connection, authorization=authorization, failure=failure, certify_no_effects=True
@@ -679,6 +680,7 @@ def test_rolled_back_terminal_write_never_returns_zero_attempt_certificate(tmp_p
             "authorization": authorization,
             "failure": failure,
             "certify_no_effects": True,
+            "web_search_requests": 0,
         }
         assert (
             original(

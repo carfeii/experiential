@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Protocol, cast
 
 from exp.common.core.artifacts import JsonObject
-from exp.runtime.gateway.contracts import GatewayRequest
+from exp.runtime.gateway.contracts import AuthorizationSnapshot, GatewayRequest
 from exp.runtime.gateway.guardrails.contracts import (
     GuardrailAction,
     GuardrailCompletion,
@@ -17,6 +17,8 @@ from exp.runtime.gateway.guardrails.contracts import (
     OutputGuardrailMode,
 )
 from exp.runtime.gateway.guardrails.session import GuardrailSession, denied_input_failure
+from exp.runtime.gateway.native_accounting_errors import NativeBridgeError
+from exp.runtime.openai_protocol.errors import OpenAIProtocolError
 
 if TYPE_CHECKING:
     from exp.runtime.gateway.guardrails.enforcement import GuardrailEngine
@@ -33,6 +35,37 @@ def validate_guardrail_engine(engine: GuardrailEngine | None) -> None:
             "guardrails require native GUARDRAIL_CONTRACT_VERSION=3; "
             "install the coordinated native package"
         )
+
+
+def open_admission_guardrails(
+    engine: GuardrailEngine | None,
+    authorization: AuthorizationSnapshot,
+    request: GatewayRequest,
+    data: JsonObject,
+    *,
+    deadline_monotonic: float,
+) -> GuardrailSession | None:
+    """Freeze admission policy and reject a replay claim made under a different snapshot."""
+    session = (
+        None
+        if engine is None
+        else engine.open_request(authorization, deadline_monotonic=deadline_monotonic)
+    )
+    if request.idempotency_key is not None:
+        revision = None if session is None else session.engine.policy_revision(session.policies)
+        if (
+            "claimed_guardrail_revision" not in data
+            or data["claimed_guardrail_revision"] != revision
+        ):
+            raise NativeBridgeError(
+                OpenAIProtocolError(
+                    status_code=409,
+                    code="idempotency_conflict",
+                    message="Guardrail policy changed during admission. Retry the request.",
+                    param="Idempotency-Key",
+                )
+            )
+    return session
 
 
 def native_output_mode(

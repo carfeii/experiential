@@ -28,6 +28,7 @@ from exp.runtime.gateway.guardrails.enforcement import GuardrailEngine
 from exp.runtime.gateway.guardrails.native import (
     NativeGuardrailsMixin,
     native_output_mode,
+    open_admission_guardrails,
     validate_guardrail_engine,
 )
 from exp.runtime.gateway.model_chain_authority import authorize_serving_model_chains
@@ -301,6 +302,7 @@ class NativeControlPlane(
         """
         assert_not_internal_classification()
         self._accounting.sweep_expired()
+        self._accounting.request_settlements.require_clear()
         data = json.loads(argument)
         surface = str(data.get("surface", "chat"))
         decoded = self._decode_body(
@@ -361,10 +363,8 @@ class NativeControlPlane(
             raise NativeBridgeError(error) from exc
 
         original_guardrail_request = request
-        guardrails = (
-            None
-            if self._guardrails is None
-            else self._guardrails.open_request(authorization, deadline_monotonic=deadline)
+        guardrails = open_admission_guardrails(
+            self._guardrails, authorization, request, data, deadline_monotonic=deadline
         )
         if guardrails is not None:
             guardrails.detectors = self._guardrail_detectors
@@ -510,7 +510,11 @@ class NativeControlPlane(
                 try:
                     request = guardrails.inspect_input(request)
                 except GuardrailRejected as exc:
-                    self._accounting.finish_request_quietly(authorization, exc.failure)
+                    self._accounting.finish_request_quietly(
+                        authorization,
+                        exc.failure,
+                        web_search_requests=1 if web_search_admission is not None else 0,
+                    )
                     raise NativeBridgeError(public_failure_error(exc.failure)) from None
             _require_bound_wire_authority(
                 None
@@ -725,7 +729,11 @@ class NativeControlPlane(
                     ),
                 )
             except GuardrailRejected as exc:
-                self._accounting.finish_request_quietly(authorization, exc.failure)
+                self._accounting.finish_request_quietly(
+                    authorization,
+                    exc.failure,
+                    web_search_requests=1 if web_search_admission is not None else 0,
+                )
                 raise NativeBridgeError(public_failure_error(exc.failure)) from None
         plan = None if guardrails is None else guardrails.output_plan()
         self._accounting.register(
@@ -865,23 +873,17 @@ class NativeControlPlane(
         return seal_reasoning_carrier_content(self._accounting, argument)
 
     def claim_scope(self, argument: str) -> str:
-        """Resolve the replay-store scope for one keyed request.
+        """Authorize a keyed request and freeze its replay identity.
 
-        Decode and authorize once to scope replay by tenant, surface, operation,
-        and canonical request digest. Unsupported direct routes escalate before
-        any claim; project targets use the frozen admission deployment selection.
+        The content-free scope includes caller, operation, request digest and guardrail
+        revision. Admission must retain this revision; a policy reload refuses the owner
+        before paid work. Unsupported direct routes escalate before claiming replay.
 
         Args:
-            argument: JSON object with ``raw_key``, ``body``, optional
-                ``surface`` (``"chat"`` or ``"responses"``, defaulting to
-                chat), and optional ``idempotency_key`` and
-                ``client_request_id`` header values.
+            argument: JSON with raw_key, body, optional surface and standard request headers.
 
         Returns:
-            JSON replay scope with ``organization_id``, ``identity_id``,
-            ``alias_revision_id``, ``surface``, ``caller_operation_sha256``,
-            and ``canonical_request_sha256``, or an ``{"escalate": reason}``
-            disposition naming why the native plane cannot serve the request.
+            JSON replay scope or a native escalation disposition.
 
         Raises:
             NativeBridgeError: Decoding or authorization failed.

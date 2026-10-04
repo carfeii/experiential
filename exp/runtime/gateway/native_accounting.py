@@ -56,6 +56,7 @@ from exp.runtime.gateway.native_recovery import (
     recovery_failure,
     retain_recovery_observation_time,
 )
+from exp.runtime.gateway.native_request_settlement import RequestSettlements
 from exp.runtime.gateway.native_rung_policy import (
     bind_sticky_dispatch,
     failed_dispatch_candidate,
@@ -123,6 +124,7 @@ class NativeAttemptAccounting:
                 fair-share weight. ``None`` admits every sample; exceptions skip it.
         """
         self._write_ledger = write_ledger
+        self.request_settlements = RequestSettlements(write_ledger)
         self._finish_attempt: Callable[..., None] = write_ledger.finish_attempt
         self._budget_error_factory = budget_error_factory
         self._cache_sample_gate = cache_sample_gate
@@ -172,7 +174,7 @@ class NativeAttemptAccounting:
     @property
     def accounting_healthy(self) -> bool:
         """Return whether every durable terminal write has landed."""
-        return self._accounting_healthy
+        return self._accounting_healthy and not self.request_settlements.pending
 
     @property
     def health(self) -> DeploymentHealthRegistry:
@@ -799,17 +801,17 @@ class NativeAttemptAccounting:
         failure: GatewayFailure,
         *,
         certify_no_effects: bool = False,
+        web_search_requests: int = 0,
     ) -> bool:
-        """Return committed no-effects proof; failed writes never certify free work."""
+        """Retain failed terminal writes and their exact meters for the existing sweep."""
         try:
-            committed = self._write_ledger.finish_request(
-                authorization=authorization,
-                failure=failure,
+            return self.request_settlements.finish(
+                authorization,
+                failure,
                 certify_no_effects=certify_no_effects,
+                web_search_requests=web_search_requests,
             )
-            return committed is True
-        except Exception:  # noqa: BLE001 - primary admission failure stays authoritative.
-            self._accounting_healthy = False
+        except Exception:  # noqa: BLE001 - the original sanitized admission error wins.
             return False
 
     def _record_health(
@@ -890,15 +892,12 @@ class NativeAttemptAccounting:
     def sweep_expired(self) -> None:
         """Recover retained settlements and close abandoned requests.
 
-        A retained settlement (the data plane's terminal write failed) is
-        replayed verbatim so the original outcome, usage, and finalize flag
-        land. A request with no settlement at all past its deadline plus
-        grace is closed as cancelled through its active attempt when one
-        exists, otherwise through its request row; that is the backstop for
-        wire-contract failures and data-plane crashes short of process death.
-        A retained settlement that fails again here latches
-        accounting-unhealthy as a durable loss.
+        Retained writes replay the original outcome, usage, and finalize flag.
+        Expired requests close as cancelled through their active attempt, or request row
+        if none exists. This covers broken wire contracts and data-plane crashes short
+        of process death. Repeated attempt-write failures latch accounting unhealthy.
         """
+        self.request_settlements.retry(_SWEEP_BATCH)
         now = time.monotonic()
         with self._lock:
             retained = [

@@ -39,7 +39,9 @@ response delivery, cancellation, and settlement all use that session. No later
 lookup changes a request's policy midway through execution.
 
 Non-modifying input checks inspect original intent before privacy rewrites. If a
-rewrite changes the request, those checks inspect its result again. Recovered
+rewrite changes the request, those checks inspect its result again. When multiple
+modifiers apply, every earlier modifier independently validates the final subject;
+conflicting rewrites fail closed even if they restore the original text. Recovered
 plaintext reasoning and gateway-expanded conversation context are inspected before
 the next provider dispatch. Exact duplicate subjects share work only within one
 request. All policies use the same classifier executor, bounds, verdict actions,
@@ -87,7 +89,8 @@ responses or invoke output classifiers.
 The shared completion projection includes assistant text, refusal text, readable
 reasoning, retrieved content, and complete tool arguments. Checks inspect original
 output and any rewrite before release. A text rewrite suppresses alternate output
-channels. Tool arguments are inspected but cannot be rewritten. Generated
+channels, and replacing a typed refusal converts its refusal terminal to completion.
+Other provider failures remain failures. Tool arguments are inspected but cannot be rewritten. Generated
 gateway-owned tool calls are checked before execution. Gateway-generated metadata
 and terminal responses are checked while the same accounting entry still owns the
 session; a requested metadata rewrite fails closed because protocol encoders cannot
@@ -103,7 +106,10 @@ observe and continue after uncertain classifier results. Platform policies are
 always protected.
 
 Replay keys include the full applicable policy set, execution settings, and revision.
-Change `revision` whenever the detector or external rollout configuration changes.
+A keyed admission compares its frozen policy revision with the replay claim before
+inspection, acceptance, search, or model dispatch. A reload between claim and admission
+returns `409`; retrying takes a new snapshot. Change `revision` whenever the detector
+or external rollout configuration changes.
 Policies are immutable; compose a new engine snapshot when changing adapters.
 Default inspection bounds are 1 MiB, and the same absolute request deadline applies
 throughout inspection and provider execution.
@@ -112,6 +118,15 @@ Startup requires `GUARDRAIL_CONTRACT_VERSION=3`. Publish coordinated engine and
 native packages before a downstream host updates its exact release pins. There
 are no synchronous adapter wrappers, alternate mandatory-policy entry points, or
 package-version fallbacks.
+
+A host ledger must implement `finish_request(..., web_search_requests=...)` for
+completed gateway searches whose expanded input is refused before any model attempt.
+Persist that meter atomically with the request failure, with zero customer charge;
+it is provider expense evidence, not a model dispatch. Never certify such work as
+having no paid effects. The local ledger stores the meter on `gateway_requests`.
+Accounting retains failed terminal writes for its existing retry sweep and refuses
+new paid admission work until the retained request writes commit. Hosted ledgers must
+adopt this contract before enabling the coordinated release.
 
 This integration covers native Chat Completions, Responses (including WebSocket
 admission), and Messages. Native Decisions rejects identities with applicable policies
@@ -217,8 +232,8 @@ failed check and continue the remaining chain.
 
 ## Latency
 
-Input enforcement is on the request critical path after continuation expansion
-and before dispatch. Output enforcement for a protected identity delays the
+With `input_execution="before_dispatch"`, input inspection follows continuation
+expansion and delays dispatch. Parallel input inspection uses the overlap rules above. Output enforcement for a protected identity delays the
 first visible byte until the winning completion is buffered and the output
 chain returns.
 

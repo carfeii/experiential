@@ -373,6 +373,9 @@ def _admit(
     }
     if surface is not None:
         payload["surface"] = surface
+    if idempotency_key is not None:
+        scope = json.loads(control.claim_scope(json.dumps(payload)))
+        payload["claimed_guardrail_revision"] = scope.get("guardrail_revision")
     return json.loads(control.admit(json.dumps(payload)))
 
 
@@ -5477,6 +5480,7 @@ def test_keyed_store_false_never_reaches_the_continuation_store(tmp_path: Path) 
                     "body": body,
                     "surface": "responses",
                     "idempotency_key": "codex-op",
+                    "claimed_guardrail_revision": None,
                 }
             )
         )
@@ -5561,6 +5565,7 @@ def test_keyed_reasoning_content_joins_replay_identity(tmp_path: Path) -> None:
                         "body": body,
                         "surface": "responses",
                         "idempotency_key": "reasoning-op",
+                        "claimed_guardrail_revision": None,
                     }
                 )
             )

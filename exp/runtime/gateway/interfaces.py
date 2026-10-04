@@ -122,9 +122,13 @@ class AttemptLedger(Protocol):
         authorization: AuthorizationSnapshot,
         failure: GatewayFailure,
         certify_no_effects: bool = False,
+        web_search_requests: int = 0,
     ) -> bool:
         """Terminalize work, returning a committed no-effects certificate.
 
+        ``web_search_requests`` retains completed gateway searches with no model attempt.
+        Persist it atomically with the failure as provider expense, without customer charge.
+        Nonzero search usage must never receive a no-effects certificate.
         Certification defaults false and requires trusted admission without paid prework.
         The terminal write and attempt-absence check serialize with attempt creation.
         Historical failures and any prior attempt remain uncertified; failed writes raise.

@@ -134,6 +134,9 @@ pub(crate) async fn responses(
         "client_ip": client_ip(&headers),
         "capture_session_id": crate::capture::session_id(&headers),
     });
+    if let Some(owner) = lease.as_ref() {
+        admit_value["claimed_guardrail_revision"] = json!(owner.guardrail_revision());
+    }
     with_app_identity(&mut admit_value, &headers);
     let admit_argument = compact_json(&admit_value);
     let admission_text = match state.bridge.call("admit", admit_argument).await {

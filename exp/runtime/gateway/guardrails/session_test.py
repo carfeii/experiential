@@ -18,6 +18,7 @@ from exp.runtime.gateway.guardrails.classifiers import (
     ScriptedClassifier,
 )
 from exp.runtime.gateway.guardrails.client import DirectClassifierClient
+from exp.runtime.gateway.guardrails.config import engine_from_document
 from exp.runtime.gateway.guardrails.contracts import (
     ClassifierVerdict,
     GuardrailAction,
@@ -28,6 +29,7 @@ from exp.runtime.gateway.guardrails.contracts import (
     GuardrailPolicy,
     GuardrailRejected,
 )
+from exp.runtime.gateway.guardrails.deterministic import compile_native_detectors
 from exp.runtime.gateway.guardrails.enforcement import GuardrailEngine
 from exp.runtime.gateway.guardrails.native import validate_guardrail_engine
 from exp.runtime.gateway.guardrails.native_test import _authorization
@@ -388,3 +390,65 @@ def test_completed_future_settlement_uses_verdict_time_not_poll_time(
     else:
         assert failure is not None
         assert failure.safe_details["input_guardrail_denied"] is True
+
+
+@pytest.mark.parametrize("stage", ["input", "output"])
+@pytest.mark.parametrize("separate_scopes", [False, True])
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("original", ["secret", "innocent"])
+def test_later_modifier_cannot_undo_an_earlier_redaction(
+    stage: str, separate_scopes: bool, native: bool, original: str
+) -> None:
+    """Even a rewrite back to the original must satisfy every earlier modifier independently."""
+    checks = [
+        {
+            "check_id": adapter,
+            "capability": "pii",
+            "stage": stage,
+            "action": "modify",
+            "adapter_id": adapter,
+            "timeout_ms": 500,
+        }
+        for adapter in ("redact", "undo")
+    ]
+    policies = [{"policy_id": "platform", "protected": True, "checks": checks}]
+    if separate_scopes:
+        policies[0]["checks"] = checks[:1]
+        policies.append(
+            {
+                "policy_id": "identity",
+                "organization_id": "organization-one",
+                "identity_id": "identity-one",
+                "protected": True,
+                "checks": checks[1:],
+            }
+        )
+    engine = engine_from_document(
+        {
+            "adapters": [
+                {
+                    "kind": "regex",
+                    "adapter_id": "redact",
+                    "patterns": ["secret"],
+                    "replacement": "safe",
+                },
+                {
+                    "kind": "regex",
+                    "adapter_id": "undo",
+                    "patterns": ["safe|innocent"],
+                    "replacement": "secret",
+                },
+            ],
+            "policies": policies,
+        }
+    )
+    session = _session(engine)
+    if native:
+        session.detectors = compile_native_detectors(engine.deterministic_specifications)
+    if stage == "input":
+        with pytest.raises(GuardrailRejected):
+            session.inspect_input(_request(original))
+    else:
+        assert session.output_plan() is None
+        with pytest.raises(GuardrailRejected):
+            session.inspect_output(GuardrailCompletion(text=original))

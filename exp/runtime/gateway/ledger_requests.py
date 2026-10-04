@@ -18,6 +18,7 @@ def finish_request(
     failure: GatewayFailure,
     terminal_at: datetime,
     certify_no_effects: bool = False,
+    web_search_requests: int = 0,
 ) -> bool:
     """Persist one immutable no-effects certificate under the dispatch write fence.
 
@@ -28,14 +29,18 @@ def finish_request(
         terminal_at: Wall-clock terminal time, never used to identify the newest owner.
         certify_no_effects: Trusted admission attestation that no paid prework was possible.
             Defaults false; historical or repeated finishes cannot upgrade a saved failure.
+        web_search_requests: Completed gateway searches with no model attempt to own them.
+            Retained as provider expense evidence with zero customer charge, never a certificate.
 
     Returns:
         Whether this failed direct request has a persisted certificate and no attempts.
     """
+    if web_search_requests < 0:
+        raise ValueError("web_search_requests must be nonnegative")
     state, _, _, _ = terminal_values(None, failure)
     row = connection.execute(
         """
-        SELECT organization_id, terminal_state, failed_without_effects,
+        SELECT organization_id, terminal_state, failed_without_effects, web_search_requests,
           NOT EXISTS (SELECT 1 FROM gateway_attempts AS a
             WHERE a.request_id = gateway_requests.request_id) AS no_dispatch
         FROM gateway_requests WHERE request_id = ?
@@ -46,12 +51,17 @@ def finish_request(
         raise GatewayLedgerError("request was not durably accepted")
     if str(row["organization_id"]) != authorization.organization_id:
         raise GatewayLedgerError("request authority differs from accepted request")
+    if web_search_requests and not row["no_dispatch"]:
+        raise GatewayLedgerError("unattempted search meter cannot replace attempt-owned usage")
     if row["terminal_state"] is not None:
         if str(row["terminal_state"]) == state:
+            if web_search_requests and web_search_requests != row["web_search_requests"]:
+                raise GatewayLedgerError("request already settled with another search meter")
             return bool(row["failed_without_effects"] and row["no_dispatch"])
         raise GatewayLedgerError("request is already settled with another terminal state")
     certified = (
         certify_no_effects
+        and not web_search_requests
         and isinstance(authorization.target, DirectTarget)
         and state == "failed"
         and bool(row["no_dispatch"])
@@ -59,9 +69,15 @@ def finish_request(
     connection.execute(
         """
         UPDATE gateway_requests
-        SET terminal_state = ?, terminal_at = ?, failed_without_effects = ?
+        SET terminal_state = ?, terminal_at = ?, failed_without_effects = ?, web_search_requests = ?
         WHERE request_id = ? AND terminal_state IS NULL
         """,
-        (state, utc_text(terminal_at), int(certified), authorization.request_id),
+        (
+            state,
+            utc_text(terminal_at),
+            int(certified),
+            web_search_requests,
+            authorization.request_id,
+        ),
     )
     return certified

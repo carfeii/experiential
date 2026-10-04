@@ -328,6 +328,7 @@ class GroupCommitAttemptLedger:
         authorization: AuthorizationSnapshot,
         failure: GatewayFailure,
         certify_no_effects: bool = False,
+        web_search_requests: int = 0,
     ) -> bool:
         """Return the no-effects certificate only after the terminal write commits.
 
@@ -335,6 +336,7 @@ class GroupCommitAttemptLedger:
             authorization: Frozen authority identifying the accepted request.
             failure: Sanitized pre-dispatch terminal failure.
             certify_no_effects: Trusted admission attestation; omitted callers cannot certify.
+            web_search_requests: Completed searches with no model attempt to own the meter.
         """
         return await self._submit(
             lambda connection: self.core.apply_finish_request(
@@ -342,6 +344,7 @@ class GroupCommitAttemptLedger:
                 authorization=authorization,
                 failure=failure,
                 certify_no_effects=certify_no_effects,
+                web_search_requests=web_search_requests,
             )
         )
 
@@ -742,6 +745,7 @@ class SyncGroupCommitLedger:
         authorization: AuthorizationSnapshot,
         failure: GatewayFailure,
         certify_no_effects: bool = False,
+        web_search_requests: int = 0,
     ) -> bool:
         """Return the no-effects certificate only after the terminal write commits.
 
@@ -749,6 +753,7 @@ class SyncGroupCommitLedger:
             authorization: Frozen authority identifying the accepted request.
             failure: Sanitized pre-dispatch terminal failure.
             certify_no_effects: Trusted admission attestation; omitted callers cannot certify.
+            web_search_requests: Completed searches with no model attempt to own the meter.
         """
         return self._writer.submit_blocking(
             lambda connection: self._writer.core.apply_finish_request(
@@ -756,6 +761,7 @@ class SyncGroupCommitLedger:
                 authorization=authorization,
                 failure=failure,
                 certify_no_effects=certify_no_effects,
+                web_search_requests=web_search_requests,
             )
         )
 

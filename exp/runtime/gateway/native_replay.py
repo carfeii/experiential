@@ -63,5 +63,6 @@ def replay_scope_payload(
         "surface": key.surface.value,
         "caller_operation_sha256": key.caller_operation_sha256,
         "canonical_request_sha256": key.canonical_request_sha256,
+        "guardrail_revision": inspection_revision,
     }
     return json.dumps(scope, separators=(",", ":"))

@@ -191,6 +191,7 @@ class _RecordingLedger:
         self.tool_search_requests: list[int | None] = []
         self.rate_limit_settlements: list[JsonObject] = []
         self.finished_requests: list[GatewayFailure] = []
+        self.request_search_meters: list[int] = []
         self.budget_rejections: dict[str, BudgetScopeKind] = {}
         self.fail_finishes = 0
         self.fail_request_finishes = 0
@@ -312,12 +313,14 @@ class _RecordingLedger:
         authorization: AuthorizationSnapshot,
         failure: GatewayFailure,
         certify_no_effects: bool = False,
+        web_search_requests: int = 0,
     ) -> bool:
         """Record terminalization and report the fake's exact prior-attempt history."""
         if self.fail_request_finishes:
             self.fail_request_finishes -= 1
             raise RuntimeError("scripted request terminal-write failure")
         self.finished_requests.append(failure)
+        self.request_search_meters.append(web_search_requests)
         return certify_no_effects and authorization.request_id not in self.started_request_ids
 
 

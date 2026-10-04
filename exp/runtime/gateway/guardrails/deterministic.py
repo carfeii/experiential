@@ -65,8 +65,8 @@ def compile_native_detectors(specifications: Mapping[str, str]) -> dict[str, Nat
 
     Returns:
         Adapter identity to compiled detector, for the adapters that
-        compiled natively. An environment without the extension gets an
-        empty mapping and keeps the Python path.
+        compiled natively. The coordinated native extension is required when
+        specifications are present; missing extensions fail startup.
     """
     if not specifications:
         return {}

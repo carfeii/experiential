@@ -72,11 +72,11 @@ def load_guardrail_engine(
     *,
     http_client: httpx.AsyncClient | None = None,
 ) -> GuardrailEngine | None:
-    """Return an engine when a file assigns at least one identity policy.
+    """Return an engine when a file configures platform or identity policies.
 
     Missing files leave the gateway unguarded. A valid file with an empty
     policy list is also unguarded: the exact no-engine hot path. The file
-    assigns policies by organization and identity. It may register ``keyword``
+    configures global policies and scoped identity assignments. It may register ``keyword``
     adapters for local tests and ``http_json`` adapters for dedicated
     classifier endpoints. It never stores raw prompts, responses, detector
     payloads, or credentials.

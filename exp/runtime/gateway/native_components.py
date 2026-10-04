@@ -98,9 +98,13 @@ class SyncWriteLedger(Protocol):
         authorization: AuthorizationSnapshot,
         failure: GatewayFailure,
         certify_no_effects: bool = False,
+        web_search_requests: int = 0,
     ) -> bool:
         """Finalize work and certify no paid effects under the dispatch write fence.
 
+        ``web_search_requests`` retains completed gateway searches with no model attempt.
+        Persist it atomically with the failure as provider expense, without customer charge.
+        Nonzero search usage must never receive a no-effects certificate.
         Certification defaults false and requires trusted admission without paid prework.
         Return true only after commit. Any prior attempt or uncertified terminal failure
         returns false; persistence failures raise instead of certifying.

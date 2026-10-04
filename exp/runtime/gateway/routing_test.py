@@ -169,7 +169,14 @@ def test_forwarding_resolver_preserves_actual_serving_authority(
             ),
         )
     )
-    argument = json.dumps({"raw_key": key, "body": _chat_body(), "idempotency_key": "wrapper"})
+    argument = json.dumps(
+        {
+            "raw_key": key,
+            "body": _chat_body(),
+            "idempotency_key": "wrapper",
+            "claimed_guardrail_revision": None,
+        }
+    )
     if target_kind == "chain":
         with pytest.raises(NativeBridgeError) as error:
             getattr(control, operation)(argument)

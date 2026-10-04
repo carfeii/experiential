@@ -198,6 +198,13 @@ pub fn apply_text_replacement(events: &[Event], replacement: &str) -> Vec<Event>
                 rewritten.push(Event::TextDelta(replacement.to_string()));
                 inserted = true;
             }
+            Event::Failed(failure) if failure.failure_class == FailureClass::Refusal => {
+                if !inserted {
+                    rewritten.push(Event::TextDelta(replacement.to_string()));
+                    inserted = true;
+                }
+                rewritten.push(Event::Completed);
+            }
             Event::Completed
             | Event::Incomplete
             | Event::StoppedAtSequence(_)
@@ -672,6 +679,24 @@ mod tests {
         assert!(!rewritten
             .iter()
             .any(|event| matches!(event, Event::RefusalDelta(_))));
+    }
+
+    #[test]
+    fn rewritten_typed_refusal_completes_but_other_failures_remain_failed() {
+        for class in [FailureClass::Refusal, FailureClass::Unavailable] {
+            let events = vec![
+                Event::RefusalDelta("private refusal".into()),
+                Event::Failed(Failure::new(class, "sanitized error")),
+            ];
+            let rewritten = apply_text_replacement(&events, "safe");
+            assert!(matches!(&rewritten[0], Event::TextDelta(text) if text == "safe"));
+            if class == FailureClass::Refusal {
+                assert!(matches!(rewritten[1], Event::Completed));
+            } else {
+                assert!(matches!(&rewritten[1], Event::Failed(f) if f.failure_class == class));
+            }
+            assert_eq!(rewritten.len(), 2);
+        }
     }
 
     /// A deterministic control plane: it holds the last four characters and

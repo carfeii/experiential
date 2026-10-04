@@ -25,6 +25,7 @@ pub struct ReplayKey {
     pub surface: String,
     pub caller_operation_sha256: String,
     pub canonical_request_sha256: String,
+    pub guardrail_revision: Option<String>,
 }
 
 impl ReplayKey {
@@ -354,6 +355,11 @@ impl OwnerLease {
         &self.key.alias_revision_id
     }
 
+    /// The frozen inspection configuration the owner must also use at admission.
+    pub fn guardrail_revision(&self) -> Option<&str> {
+        self.key.guardrail_revision.as_deref()
+    }
+
     /// Publish one exact successful response from the unique owner.
     pub async fn complete(&mut self, response: CachedResponse) -> Result<(), PublicError> {
         let result = self
@@ -421,6 +427,7 @@ mod tests {
             surface: "chat_completions".to_string(),
             caller_operation_sha256: operation.to_string(),
             canonical_request_sha256: body.to_string(),
+            guardrail_revision: None,
         }
     }
 

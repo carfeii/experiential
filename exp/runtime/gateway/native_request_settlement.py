@@ -1,0 +1,108 @@
+"""Retain request-only terminal writes, including paid prework, until they commit."""
+
+from __future__ import annotations
+
+import threading
+from dataclasses import dataclass, field
+from inspect import signature
+
+from exp.runtime.gateway.contracts import AuthorizationSnapshot, GatewayFailure
+from exp.runtime.gateway.native_accounting_errors import NativeBridgeError
+from exp.runtime.gateway.native_components import SyncWriteLedger
+from exp.runtime.openai_protocol.errors import OpenAIProtocolError
+
+
+@dataclass
+class _Settlement:
+    authorization: AuthorizationSnapshot
+    failure: GatewayFailure
+    certify_no_effects: bool
+    web_search_requests: int
+    retained: bool = False
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+class RequestSettlements:
+    """Request-only counterpart of the accounting registry's retained attempt settlements."""
+
+    def __init__(self, ledger: SyncWriteLedger) -> None:
+        """Bind the durable owner and retain no work until a terminal write begins."""
+        try:
+            signature(ledger.finish_request).bind(
+                authorization=None, failure=None, certify_no_effects=False, web_search_requests=0
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "write ledger must implement finish_request(..., web_search_requests=...) "
+                "and persist unattempted search expense before enabling this gateway release"
+            ) from exc
+        self._ledger = ledger
+        self._pending: dict[str, _Settlement] = {}
+        self._lock = threading.Lock()
+
+    @property
+    def pending(self) -> bool:
+        """Whether a failed write remains uncommitted; ordinary in-progress commits are healthy."""
+        with self._lock:
+            return any(settlement.retained for settlement in self._pending.values())
+
+    def require_clear(self) -> None:
+        """Refuse new paid admission work while a previous request's meter is uncommitted."""
+        if self.pending:
+            raise NativeBridgeError(
+                OpenAIProtocolError(
+                    status_code=503,
+                    code="accounting_unavailable",
+                    message="Request accounting is recovering. Retry later.",
+                )
+            )
+
+    def finish(
+        self,
+        authorization: AuthorizationSnapshot,
+        failure: GatewayFailure,
+        *,
+        certify_no_effects: bool = False,
+        web_search_requests: int = 0,
+    ) -> bool:
+        """Retain the original failure and meter before attempting an idempotent write."""
+        with self._lock:
+            settlement = self._pending.setdefault(
+                authorization.request_id,
+                _Settlement(
+                    authorization,
+                    failure,
+                    certify_no_effects,
+                    web_search_requests,
+                ),
+            )
+        return self._commit(settlement)
+
+    def _commit(self, settlement: _Settlement) -> bool:
+        """Serialize duplicate finish/sweep writers without blocking other requests."""
+        with settlement.lock:
+            try:
+                committed = self._ledger.finish_request(
+                    authorization=settlement.authorization,
+                    failure=settlement.failure,
+                    certify_no_effects=settlement.certify_no_effects,
+                    web_search_requests=settlement.web_search_requests,
+                )
+            except Exception:  # noqa: BLE001 - failed ownership must survive any ledger fault.
+                with self._lock:
+                    settlement.retained = True
+                raise
+            with self._lock:
+                if self._pending.get(settlement.authorization.request_id) is settlement:
+                    del self._pending[settlement.authorization.request_id]
+            return committed is True
+
+    def retry(self, limit: int) -> None:
+        """Replay bounded retained writes verbatim; a repeated failure keeps its owner."""
+        with self._lock:
+            pending = [item for item in self._pending.values() if item.retained][:limit]
+        for settlement in pending:
+            try:
+                self._commit(settlement)
+            except Exception:  # noqa: BLE001 - retain until the durable writer recovers.
+                continue

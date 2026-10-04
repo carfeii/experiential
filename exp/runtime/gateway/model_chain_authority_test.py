@@ -540,6 +540,7 @@ def test_native_plain_authorization_works_with_or_without_concrete_host(
                     "raw_key": key,
                     "body": _chat_body(),
                     "idempotency_key": "plain",
+                    "claimed_guardrail_revision": None,
                 }
             )
         )
