@@ -4,9 +4,24 @@ from __future__ import annotations
 
 import json
 
-from exp.runtime.gateway.contracts import GatewayApiSurface
+from exp.runtime.gateway.contracts import GatewayApiSurface, GatewayFailure, GatewayFailureClass
+from exp.runtime.gateway.native_accounting_errors import NativeBridgeError
 from exp.runtime.models.providers.errors import ProviderCapabilityError
 from exp.runtime.openai_protocol.errors import OpenAIProtocolError, unsupported_field
+
+
+def admission_boundary_failure(error: NativeBridgeError) -> GatewayFailure:
+    """Keep the public boundary's sanitized client/server classification in the ledger."""
+    public = json.loads(error.public_error_json)
+    return GatewayFailure(
+        failure_class=(
+            GatewayFailureClass.INTERNAL
+            if public["status_code"] >= 500
+            else GatewayFailureClass.INVALID_REQUEST
+        ),
+        safe_message=public["message"],
+    )
+
 
 _PUBLIC_REQUEST_CAPABILITY_PARAMS = {
     GatewayApiSurface.CHAT_COMPLETIONS: {

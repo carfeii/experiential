@@ -3322,9 +3322,15 @@ def test_encrypted_reasoning_pins_winning_fallback_and_rejects_credential_drift(
     recorded: list[GatewayFailure] = []
     original_finish = control._accounting.finish_request_quietly  # noqa: SLF001
 
-    def _capture_finish(authorization: AuthorizationSnapshot, failure: GatewayFailure) -> bool:
+    def _capture_finish(
+        authorization: AuthorizationSnapshot,
+        failure: GatewayFailure,
+        *,
+        web_search_requests: int = 0,
+    ) -> bool:
+        """Record the verdict while preserving the complete current meter contract."""
         recorded.append(failure)
-        return original_finish(authorization, failure)
+        return original_finish(authorization, failure, web_search_requests=web_search_requests)
 
     monkeypatch.setattr(control._accounting, "finish_request_quietly", _capture_finish)  # noqa: SLF001
     with pytest.raises(NativeBridgeError) as rejected:
@@ -3358,9 +3364,15 @@ def test_admission_maps_a_route_build_failure_to_a_retryable_unavailable(
     recorded: list[GatewayFailure] = []
     original_finish = control._accounting.finish_request_quietly  # noqa: SLF001
 
-    def _capture(authorization: AuthorizationSnapshot, failure: GatewayFailure) -> bool:
+    def _capture(
+        authorization: AuthorizationSnapshot,
+        failure: GatewayFailure,
+        *,
+        web_search_requests: int = 0,
+    ) -> bool:
+        """Record the verdict while preserving the complete current meter contract."""
         recorded.append(failure)
-        return original_finish(authorization, failure)
+        return original_finish(authorization, failure, web_search_requests=web_search_requests)
 
     monkeypatch.setattr(control._accounting, "finish_request_quietly", _capture)  # noqa: SLF001
 
@@ -5600,9 +5612,15 @@ def test_capability_rejection_names_the_public_request_field(
     recorded: list[GatewayFailure] = []
     original_finish = control._accounting.finish_request_quietly  # noqa: SLF001
 
-    def _capture_finish(authorization: AuthorizationSnapshot, failure: GatewayFailure) -> bool:
+    def _capture_finish(
+        authorization: AuthorizationSnapshot,
+        failure: GatewayFailure,
+        *,
+        web_search_requests: int = 0,
+    ) -> bool:
+        """Record the verdict while preserving the complete current meter contract."""
         recorded.append(failure)
-        return original_finish(authorization, failure)
+        return original_finish(authorization, failure, web_search_requests=web_search_requests)
 
     monkeypatch.setattr(control._accounting, "finish_request_quietly", _capture_finish)  # noqa: SLF001
     body = json.dumps(

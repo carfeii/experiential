@@ -50,10 +50,11 @@ from exp.runtime.gateway.native_admission import (
 from exp.runtime.gateway.native_authentication import NativeAuthenticationMixin
 from exp.runtime.gateway.native_batches import NativeBatchRelayMixin
 from exp.runtime.gateway.native_bridge_errors import (
-    escalation as _escalation,
+    admission_boundary_failure,
+    ledger_capability_message,
 )
 from exp.runtime.gateway.native_bridge_errors import (
-    ledger_capability_message,
+    escalation as _escalation,
 )
 from exp.runtime.gateway.native_bridge_errors import (
     public_capability_error as _public_capability_error,
@@ -526,14 +527,11 @@ class NativeControlPlane(
         except NativeBridgeError:
             raise
         except NativeDialectUnavailableError as exc:
-            return self._escalate_accepted(authorization, str(exc))
+            return self._escalate_accepted(
+                authorization, str(exc), web_search_requests=int(web_search_admission is not None)
+            )
         except OpenAIProtocolError as exc:
-            # A continuation whose bound provider authority is no longer
-            # available is a CLIENT error (400 previous_response_not_found: resend
-            # the full conversation), not a gateway-internal fault. Class the
-            # durable failure by the public status so usage and health read it
-            # as a client failure and it never pages as internal; the caller
-            # still receives the exact public error unchanged.
+            # Preserve client failures as non-internal and retain any completed search.
             self._accounting.finish_request_quietly(
                 authorization,
                 GatewayFailure(
@@ -544,6 +542,7 @@ class NativeControlPlane(
                     ),
                     safe_message=exc.detail.message,
                 ),
+                web_search_requests=int(web_search_admission is not None),
             )
             raise NativeBridgeError(exc) from exc
         except Exception as exc:  # noqa: BLE001 - raised after route packaging below.
@@ -557,6 +556,7 @@ class NativeControlPlane(
                 return self._escalate_accepted(
                     authorization,
                     "host policy does not permit native execution of this route",
+                    web_search_requests=int(web_search_admission is not None),
                 )
 
         # Admission returns the full ordered route; no attempt row exists
@@ -652,9 +652,12 @@ class NativeControlPlane(
                 wire_route,
                 automatic=self._automatic_cache is not None,
             )
-        except NativeBridgeError:
-            # The enriched fail-closed capability rejection above already
-            # finished the accepted request; let it cross the boundary as-is.
+        except NativeBridgeError as exc:
+            self._accounting.finish_request_quietly(
+                authorization,
+                admission_boundary_failure(exc),
+                web_search_requests=int(web_search_admission is not None),
+            )
             raise
         except (ProviderParameterError, ProviderCapabilityError) as exc:
             # One shared normalizer keeps both pre-dispatch rejections
@@ -684,14 +687,18 @@ class NativeControlPlane(
                 )
             else:
                 public_error = public_failure_error(failure, param=exc.param)
-            self._accounting.finish_request_quietly(authorization, failure)
+            self._accounting.finish_request_quietly(
+                authorization, failure, web_search_requests=int(web_search_admission is not None)
+            )
             raise NativeBridgeError(public_error) from exc
         except GatewayRoutingError as exc:
             # A route/catalog that cannot be built during a rolling deploy is a
             # transient control-plane condition, not a bug: record it retryable
             # so it never pages as INTERNAL. The public error is already a 503.
             failure = gateway_updating_failure()
-            self._accounting.finish_request_quietly(authorization, failure)
+            self._accounting.finish_request_quietly(
+                authorization, failure, web_search_requests=int(web_search_admission is not None)
+            )
             raise _authority_error(exc) from exc
         except Exception as exc:  # noqa: BLE001 - boundary sanitizes every failure.
             error = _authority_error(exc)
@@ -699,12 +706,7 @@ class NativeControlPlane(
                 failure_class=GatewayFailureClass.INTERNAL,
                 safe_message="gateway admission failed before provider dispatch",
             )
-            # The public error and the ledger row carry only the sanitized
-            # text, so this record is the ONLY place the real exception
-            # survives: an unlogged INTERNAL here left a granted alias failing
-            # 500 for hours with nothing to diagnose (platform staging,
-            # 2026-09-03). The message names the request and alias; the
-            # traceback rides exc_info. Nothing here carries a credential.
+            # The public response and ledger are sanitized; retain diagnostics in the log.
             _logger.exception(
                 "gateway admission failed before provider dispatch",
                 extra={
@@ -715,7 +717,9 @@ class NativeControlPlane(
                     "exception_type": type(exc).__name__,
                 },
             )
-            self._accounting.finish_request_quietly(authorization, failure)
+            self._accounting.finish_request_quietly(
+                authorization, failure, web_search_requests=int(web_search_admission is not None)
+            )
             raise error from exc
 
         if guardrails is not None:
@@ -962,27 +966,21 @@ class NativeControlPlane(
         except Exception as exc:  # noqa: BLE001 - boundary sanitizes every failure.
             raise _authority_error(exc) from exc
 
-    def _escalate_accepted(self, authorization: AuthorizationSnapshot, reason: str) -> str:
-        """Finish one accepted-but-unservable request and return its disposition.
-
-        The request was durably accepted before route probing, so the plane
-        finalizes it content-free (no attempt row ever exists) before the
-        escalation disposition tells the data plane to fail the request
-        closed.
-
-        Args:
-            authorization: Frozen authority for the accepted request.
-            reason: Display-safe reason the native path cannot serve it.
-
-        Returns:
-            The JSON admission body carrying the escalation disposition.
-        """
+    def _escalate_accepted(
+        self,
+        authorization: AuthorizationSnapshot,
+        reason: str,
+        *,
+        web_search_requests: int = 0,
+    ) -> str:
+        """Close an accepted request with its prework meter and return its disposition."""
         self._accounting.finish_request_quietly(
             authorization,
             GatewayFailure(
                 failure_class=GatewayFailureClass.INTERNAL,
                 safe_message="the native engine cannot serve the authorized route",
             ),
+            web_search_requests=web_search_requests,
         )
         return _escalation(reason)
 

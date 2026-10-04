@@ -23,6 +23,7 @@ from exp.runtime.gateway.contracts import (
 from exp.runtime.gateway.decisions_contracts import DecisionRequest, decode_decision_request
 from exp.runtime.gateway.guardrails.client import assert_not_internal_classification
 from exp.runtime.gateway.guardrails.enforcement import GuardrailEngine
+from exp.runtime.gateway.guardrails.native import require_unguarded_surface
 from exp.runtime.gateway.model_chain_authority import authorize_serving_model_chains
 from exp.runtime.gateway.native_accounting import (
     NativeAttemptAccounting,
@@ -111,6 +112,7 @@ class NativeDecisionsMixin:
         """
         assert_not_internal_classification()
         self._accounting.sweep_expired()
+        self._accounting.request_settlements.require_clear()
         data = json.loads(argument)
         try:
             self._components.store.authenticate_key(raw_key=str(data["raw_key"]))
@@ -142,20 +144,7 @@ class NativeDecisionsMixin:
             authorization = authorize_serving_model_chains(self._components, authorization)
         except Exception as exc:  # noqa: BLE001 - sanitize the authority boundary.
             raise authority_error(exc) from exc
-        if self._guardrails is not None and self._guardrails.policies_for(
-            authorization.organization_id, authorization.identity_id
-        ):
-            raise NativeBridgeError(
-                OpenAIProtocolError(
-                    status_code=400,
-                    code="unsupported_capability",
-                    message=(
-                        "Guardrail policies do not support native decisions. "
-                        "Use a supported text endpoint."
-                    ),
-                    param="model",
-                )
-            )
+        require_unguarded_surface(self._guardrails, authorization, "decisions")
         try:
             self._write_ledger.accept_request(authorization=authorization)
         except Exception as exc:  # noqa: BLE001 - sanitize the authority boundary.

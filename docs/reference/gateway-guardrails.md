@@ -48,6 +48,11 @@ request. All policies use the same classifier executor, bounds, verdict actions,
 and content-free decision recorder. Deterministic native detectors are an execution
 strategy of that pipeline, with the same input and completion contracts.
 
+Embeddings, image generation, and native Decisions cannot yet use that normalized
+inspection contract. An applicable platform or identity policy rejects those
+endpoints before request acceptance, reservation, or provider dispatch. Identities
+with no applicable policy retain access to those surfaces.
+
 ## Input inspection alongside generation
 
 `input_execution="parallel"` allows input classification to overlap generation.
@@ -120,12 +125,14 @@ are no synchronous adapter wrappers, alternate mandatory-policy entry points, or
 package-version fallbacks.
 
 A host ledger must implement `finish_request(..., web_search_requests=...)` for
-completed gateway searches whose expanded input is refused before any model attempt.
+completed gateway searches when admission fails before any model attempt, including
+guardrail, routing, capability, dispatch-construction, and cache-binding failures.
 Persist that meter atomically with the request failure, with zero customer charge;
 it is provider expense evidence, not a model dispatch. Never certify such work as
 having no paid effects. The local ledger stores the meter on `gateway_requests`.
 Accounting retains failed terminal writes for its existing retry sweep and refuses
-new paid admission work until the retained request writes commit. Hosted ledgers must
+new paid admission work on every native endpoint until the retained request writes commit.
+Hosted ledgers must
 adopt this contract before enabling the coordinated release.
 
 This integration covers native Chat Completions, Responses (including WebSocket

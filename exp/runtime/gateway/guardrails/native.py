@@ -68,6 +68,28 @@ def open_admission_guardrails(
     return session
 
 
+def require_unguarded_surface(
+    engine: GuardrailEngine | None,
+    authorization: AuthorizationSnapshot,
+    surface: str,
+) -> None:
+    """Reject applicable policies before accepting a surface this engine cannot inspect."""
+    if engine is not None and engine.policies_for(
+        authorization.organization_id, authorization.identity_id
+    ):
+        raise NativeBridgeError(
+            OpenAIProtocolError(
+                status_code=400,
+                code="unsupported_capability",
+                message=(
+                    f"Guardrail policies do not support native {surface}. "
+                    "Use a supported text endpoint."
+                ),
+                param="model",
+            )
+        )
+
+
 def native_output_mode(
     session: GuardrailSession | None,
     request: GatewayRequest,
