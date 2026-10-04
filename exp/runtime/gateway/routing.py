@@ -84,12 +84,12 @@ class GatewayRoute(ContractModel):
         resolved_route_id: Optional host attestation that the requested public handle leads.
         cache_placed_deployment_id: The deployment the host's cache placement says holds this
             conversation's prompt cache, default ``None`` (no live placement). When set and that
-            rung authors ``saturation="refuse"``, a per-worker policy shed of it on the
-            request's first dispatch never spills to another rung: a priority caller is
-            force-admitted there up to its ceiling and every other caller gets the
-            ``lane_saturated`` 429, so the retry lands on the warm rung instead of a cold one
-            recomputing the whole prefix. A real failure on the rung still fails over, and a
-            rung with a soft or default bound keeps the historical spill.
+            rung authors a ``concurrency_bound`` with ``saturation="refuse"``, a per-worker
+            policy shed of it on the request's first dispatch never spills to another rung: a
+            priority caller overflows a capacity shed there up to its ceiling and every other
+            outcome is the ``lane_saturated`` 429, so the retry lands on the warm rung instead
+            of a cold one recomputing the whole prefix. Failures on the rung follow the pool's
+            failover rules unchanged, and a soft or default bound keeps the historical spill.
     """
 
     snapshot: ExecutionSnapshot

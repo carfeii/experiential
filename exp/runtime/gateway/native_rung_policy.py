@@ -109,9 +109,7 @@ def reserve_rung_slot(
             # through every shed (``shed_keeps_pin``), so classing it fresh
             # would answer a free caller 429 below the hard bound, in the very
             # top slice reserved for sessions whose cache lives here.
-            deployment.deployment_id == entry.route.cache_placed_deployment_id
-            and policy is not None
-            and policy.saturation == "refuse"
+            keeps_cache_placement(entry.route, deployment)
         )
     ):
         warm_session = (
@@ -272,14 +270,38 @@ def failed_dispatch_candidate(
     return candidate, disposition
 
 
+def keeps_cache_placement(route: GatewayRoute, deployment: ExactModelDeployment) -> bool:
+    """Whether ``deployment`` is the route's cache-placed rung with a hard authored bound.
+
+    The opt-in is the rung's own ``concurrency_bound`` with ``saturation="refuse"``:
+    the operator declared the bound hard, so a placed session there is refused
+    rather than spilled. A rung bounded only by the worker default, or authoring
+    ``overflow``, keeps the historical sideways spill.
+
+    Args:
+        route: The admitted route.
+        deployment: The rung being reserved.
+
+    Returns:
+        Whether a policy shed of the rung keeps a placed session there.
+    """
+    policy = deployment.gateway.dispatch
+    return (
+        deployment.deployment_id == route.cache_placed_deployment_id
+        and policy is not None
+        and policy.concurrency_bound is not None
+        and policy.saturation == "refuse"
+    )
+
+
 def shed_keeps_pin(route: GatewayRoute, candidate: int) -> bool:
     """Whether a policy shed of ``candidate`` must force-admit it rather than spill sideways.
 
     True for the issuing rung of a reasoning-pinned route and for the rung the
     host's cache placement names (``cache_placed_deployment_id``) when that rung
-    authors ``saturation="refuse"``, the operator's opt-in that its bound is
-    hard and a full rung answers 429 rather than overflow. A soft or default
-    bound keeps the historical sideways spill for placed sessions. A reasoning
+    authors a ``concurrency_bound`` with ``saturation="refuse"``
+    (``keeps_cache_placement``). A soft or default bound keeps the historical
+    sideways spill for placed sessions. A reasoning
     pin's fallbacks dispatch without the request's sealed reasoning; a cache
     placement's fallbacks hold none of the conversation's prompt cache and
     recompute its whole prefix (on Experiential Cloud's twin vLLM nodes, a
@@ -289,8 +311,9 @@ def shed_keeps_pin(route: GatewayRoute, candidate: int) -> bool:
     rate or concurrency shed the rung itself authored, which trips under
     ordinary load. The shed is disclosed as ``saturated_overflow`` exactly as a
     one-rung ladder's is, and where the rung's overflow rule refuses (always
-    for a non-priority caller on a placed rung) it answers the
-    ``lane_saturated`` 429 so the caller retries onto the same warm rung.
+    for a non-priority caller on a placed rung, and for a priority caller's
+    rate-window shed) it answers the ``lane_saturated`` 429 so the caller
+    retries onto the same warm rung.
 
     Args:
         route: The admitted route.
@@ -300,12 +323,7 @@ def shed_keeps_pin(route: GatewayRoute, candidate: int) -> bool:
         Whether the accounting keeps the candidate and admits it past the policy.
     """
     deployment = route.deployments[candidate]
-    policy = deployment.gateway.dispatch
-    if (
-        deployment.deployment_id == route.cache_placed_deployment_id
-        and policy is not None
-        and policy.saturation == "refuse"
-    ):
+    if keeps_cache_placement(route, deployment):
         return True
     return route.reasoning_pinned_deployment_id is not None and not route.requires_reasoning_strip(
         deployment

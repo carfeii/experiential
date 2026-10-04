@@ -53,14 +53,17 @@ A reasoning-pinned continuation's first dispatch still force-admits its pinned r
 shed reason (`shed_keeps_pin`), the documented continuity-over-spill trade.
 A conversation the host's cache placement names (`GatewayRoute.cache_placed_deployment_id`,
 set by the hosted platform from its fleet-wide `gateway_cache_placements`) is kept on that rung
-the same way on its first dispatch when the rung authors `saturation="refuse"`: a shed there never
-spills to a sibling rung holding none of its prompt cache. A free caller gets the 429 above and
-retries onto the same warm rung, while a priority caller overflows that rung up to its ceiling.
-A soft (`overflow`) or default bound keeps the historical sideways spill for placed sessions. Only a real failure on the rung (transport, timeout,
-provider error, a circuit-open or throttled rung) fails over, and a request with no placement
-balances across the rungs exactly as before. On Experiential Cloud's twin vLLM nodes a spilled
-turn recomputed its whole 100k-token prefix, and sheds caused about two thirds of the fleet's
-uncached prefill.
+the same way on its first dispatch when the rung authors a `concurrency_bound` with
+`saturation="refuse"`: a shed there never spills to a sibling rung holding none of its prompt
+cache. A free caller gets the 429 above and retries onto the same warm rung; a priority caller
+overflows a capacity shed on that rung up to its ceiling (a rate-window shed gives it the 429
+too). A soft (`overflow`) or default bound keeps the historical sideways spill for placed
+sessions. Failures on the rung are untouched: an operational failure (transport, timeout,
+provider error, a circuit-open rung) advances the ladder, and a provider throttle follows the
+pool's `failover_mode` and `throttle_cache_threshold` as before (`maximize_cache` surfaces it).
+A request with no placement balances across the rungs exactly as before. On Experiential
+Cloud's twin vLLM nodes a spilled turn recomputed its whole 100k-token prefix, and sheds caused
+about two thirds of the fleet's uncached prefill.
 
 ## Priority callers and default fairness
 

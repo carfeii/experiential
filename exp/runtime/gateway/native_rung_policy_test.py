@@ -710,7 +710,11 @@ def test_shed_keeps_the_cache_placed_rung_on_the_first_dispatch_only() -> None:
     assert shed_keeps_pin(gone, 0) is False
     assert shed_keeps_pin(gone, 1) is False
     # A soft or default bound keeps the historical spill for a placed session.
-    for dispatch in (None, GatewayRungDispatchPolicy(concurrency_bound=2)):
+    for dispatch in (
+        None,
+        GatewayRungDispatchPolicy(concurrency_bound=2),
+        GatewayRungDispatchPolicy(requests_per_minute=10, saturation="refuse"),
+    ):
         soft = _entry(
             (
                 _deployment("deployment-a", connection_sha256="b" * 64, dispatch=dispatch),
