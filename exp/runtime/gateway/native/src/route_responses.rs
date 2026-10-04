@@ -232,12 +232,12 @@ pub(crate) async fn responses(
         )),
         output_token_cap: admission.maximum_output_tokens,
         tool_search: admission.tool_search.as_ref(),
-        inspection: admission
-            .guardrail_inspection
-            .then_some(crate::waterfall::InspectionContext {
+        output_guardrails: admission.output_guardrail.enforces().then_some(
+            crate::waterfall::OutputGuardrailContext {
                 web_search: admission.web_search.as_ref(),
                 responses: true,
-            }),
+            },
+        ),
     };
     let mut won =
         acquire_guarded_attempt(&context, &mut guard, admission.guardrail_input_pending).await;
@@ -745,13 +745,8 @@ async fn stream_responses(
         let mut terminal: Option<Event> = None;
         let mut retention = ResponsesRetention::default();
         let mut reasoning_content_carrier: Option<String> = None;
-        // Withhold pending redaction and host-inspection segments.
-        let mut output_guardrails = StreamGuardrails::new(
-            &request_id,
-            incremental_guardrail,
-            admission.guardrail_inspection,
-            deadline,
-        );
+        // Withhold undecided deterministic redaction segments.
+        let mut output_guardrails = StreamGuardrails::new(&request_id, incremental_guardrail);
         let terminal_frames: Vec<String>;
 
         macro_rules! fail_stream {

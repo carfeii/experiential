@@ -1,186 +1,133 @@
 # Gateway guardrails
 
-## Mandatory policies in the shared engine
+## One policy engine and request lifecycle
 
-Hosts bind mandatory checks to the same engine and classifier registry as customer
-policies:
+Every guardrail uses `GuardrailPolicy`, the same policy store, and a request-owned
+`GuardrailSession` created by `GuardrailEngine`. Scope determines which checks apply;
+it does not select a different execution pipeline. A policy without organization
+and identity IDs applies to all identities and must be protected. Identity assignments
+add checks and cannot replace or disable platform checks.
 
 ```python
 engine = GuardrailEngine(
-    store=customer_policies,
-    client=DirectClassifierClient(classifier_registry),
-    monotonic=time.monotonic,
-    mandatory_policy=MandatoryGuardrailPolicy(
-        policy_id="platform-content-policy",
-        revision="detector-and-rollout-v1",
-        checks=(
-            GuardrailCheck(
-                check_id="platform-input",
+    store=MappingGuardrailStore((
+        GuardrailPolicy(
+            policy_id="criminal-abuse",
+            revision="policy-v1:detector-revision",
+            protected=True,
+            input_execution="parallel",
+            checks=(GuardrailCheck(
+                check_id="criminal-abuse-input",
                 capability="content_safety",
                 stage="input",
                 action="block",
-                adapter_id="platform-classifier",
+                adapter_id="criminal-abuse",
                 timeout_ms=1000,
-            ),
-            GuardrailCheck(
-                check_id="platform-output",
-                capability="content_safety",
-                stage="output",
-                action="block",
-                adapter_id="platform-classifier",
-                timeout_ms=1000,
-            ),
+            ),),
         ),
-    ),
+    )),
+    client=DirectClassifierClient(classifier_registry),
+    monotonic=time.monotonic,
 )
 control = NativeControlPlane(components, guardrails=engine)
 ```
 
-`MandatoryGuardrailPolicy` is an immutable operator configuration from
-`exp.runtime.gateway.guardrails.contracts`. It permits only blocking checks,
-is always fail-closed, and cannot be removed by a customer identity assignment.
-It uses `GuardrailEngine`'s existing classifier client, bounded executor,
-per-check timeouts, request deadlines, decision metrics, and verdict actions.
-Default request and response inspection bounds are 1 MiB. Hosts may lower them;
-response inspection cannot exceed the native 1 MiB coverage bound.
+The gateway resolves `policies_for(organization_id, identity_id)` once for admission.
+The session captures every applicable policy, the original deadline, approval state,
+and output requirements. Continuation expansion, rewrites, gateway search rounds,
+response delivery, cancellation, and settlement all use that session. No later
+lookup changes a request's policy midway through execution.
 
-With the default `input_execution="before_dispatch"`, the engine inspects the
-normalized input after continuation
-expansion and before customer rewrites, ledger acceptance, route selection, or
-provider dispatch. It inspects customer rewrites again. Recovered plaintext
-reasoning, gateway search results, and loaded tool schemas are also checked before
-the next provider dispatch. Output checks bind fresh adapter state to that exact
-expanded request. There is one `guardrails` binding on `NativeControlPlane`.
+Non-modifying input checks inspect original intent before privacy rewrites. If a
+rewrite changes the request, those checks inspect its result again. Recovered
+plaintext reasoning and gateway-expanded conversation context are inspected before
+the next provider dispatch. Exact duplicate subjects share work only within one
+request. All policies use the same classifier executor, bounds, verdict actions,
+and content-free decision recorder. Deterministic native detectors are an execution
+strategy of that pipeline, with the same input and completion contracts.
 
-Existing classifier adapters can participate without a new transport or policy
-executor. Adapters that implement only `inspect_input` and `inspect_output` use
-complete-response buffering. The engine projects visible text, refusals,
-reasoning, retrieved content, and complete tool arguments into their existing
-`GuardrailCompletion` contract before any response content is released. Generated
-gateway-owned tool calls are also checked before execution.
+## Input inspection alongside generation
 
-An adapter may implement `IncrementalClassifier.open_output_session` from
-`exp.runtime.gateway.guardrails.streaming`. It returns a request-owned
-`ClassifierOutputSession`, or `None` to require complete-response buffering.
-The session receives ordered `GuardrailOutput` segments and returns the same
-`ClassifierVerdict` as ordinary checks. Session creation and segment calls share
-the engine's bounded executor and recursion guard. Calls for a session are ordered
-but may use different isolation worker loops; adapters must not retain loop-bound
-clients between calls. Classifiers use their own transport, never a public gateway
-route, and must not log inspected content.
+`input_execution="parallel"` allows input classification to overlap generation.
+Overlap requires every applicable input policy to select parallel execution and
+no input check to modify the request. Any privacy rewrite keeps the combined input
+chain before dispatch. The execution mode never adds an output check: the example
+above only classifies the prompt.
 
-For incremental adapters, plain text normally flushes at 256 counted UTF-8 bytes
-or a terminal event. The count includes channel and tool names. Tool frames remain
-withheld until complete arguments are available. Text, refusals, visible reasoning,
-tool arguments, and retrieved content carry separate provenance. Native pending
-content is bounded at 1 MiB and 1,024 events, with a separate 2 MiB retained-event
-bound because tool completion repeats argument deltas. The engine enforces a
-request-wide output bound across all segments. Adapters must retain enough exact
-context to interpret later segments and fail explicitly if their own coverage
-limit is exceeded.
+Host-managed generation may start while approval is pending. Native Chat, Responses,
+and Messages hold all response content until approval, including reasoning and client
+function calls. Replay publication and continuation retention also wait. Approval
+releases the pending prefix and resumes normal streaming, without waiting for full
+completion. Function declarations supplied by clients do not execute remote tools.
 
-Output goes through customer redaction and mandatory inspection before encoding
-or continuation retention. A stream may release allowed prefixes before generation
-ends; those bytes cannot be recalled if later content changes the decision. This
-mode does not guarantee zero leakage. Complete-only adapters hold the entire
-response. Buffering and classifier inference both affect latency and need separate
-measurement. There is no classifier call or mandatory stream buffering when no
-mandatory policy is configured.
+A block, classifier error, or timeout cancels the provider request and discards its
+response. The trusted `input_guardrail_denied` settlement detail requires zero
+customer charge while retaining available provider usage. Missing final usage uses
+the existing estimated or unknown-cost accounting contract. The platform bears
+provider work that already occurred; cancellation cannot undo it.
 
-Infrastructure failures become sanitized `unavailable` errors, distinct from a
-flagged policy verdict. No later segment inherits an earlier segment's allow
-result. Sessions belong to live request accounting entries, with no tenant-shared
-safe-prefix cache. The engine hashes the entire mandatory configuration, including
-`revision`, into keyed replay scope. Change `revision` whenever the detector or
-external rollout configuration changes; stale keyed replays then conflict.
+Provider-native or provider-server tools, gateway web or tool search, explicit cache
+operations, service tiers, and routes with customer-managed credentials require
+approval before dispatch. These are execution constraints of the same session.
+Customers cannot choose the operator policy's mode or forge its settlement detail.
 
-Startup requires the compiled `GUARDRAIL_INSPECTION_CONTRACT_VERSION=2` marker.
-Publish coordinated engine and native releases before a downstream host updates
-its exact PyPI pins. Coverage includes native Chat Completions, Responses
-(including WebSocket admission), and Messages. Separate image, embedding, batch,
-and host-specific inference routes require explicit host fencing. Image output
-and token probabilities are unsupported. Encrypted reasoning and signatures remain
-opaque. Provider-executed tools can act before their events reach the gateway;
-inspection gates delivery, not that remote execution.
+When provider first-token latency exceeds classifier latency, overlap can hide most
+of the inspection delay. Otherwise the first response content waits for the check.
+Measure this with the actual detector and workload. Local scripted classifiers
+validate gateway ordering and overhead, not GPU inference latency or model quality.
 
-Initial input rejection precedes durable acceptance and attempts. Gateway search
-rejection can occur after acceptance and search work but before a provider attempt.
-Rejection of generated tool-search arguments preserves the provider turn's usage
-and prevents search execution. Rejection after retrieval meters completed search
-work and prevents another provider dial. Output rejection uses normal failed-attempt
-settlement and available usage, or the existing disconnect estimate, without
-failover. Admission with mandatory checks suppresses the zero-work capacity retry
-certificate because classifier calls may perform paid I/O. Hosts must verify their
-own billing policy. This integration supplies enforcement machinery; it does not
-itself supply a hosted detector, model-quality validation, or production rollout.
+## Output policies
 
-### Concurrent input inspection
+Configured output checks use the same session and engine. Blocking and model-backed
+output checks buffer a complete normalized completion. Pure deterministic redaction
+may stream a proven-safe prefix when the request shape permits it. There is no
+incremental model-output classifier API. Input-only policies do not buffer complete
+responses or invoke output classifiers.
 
-For an input-only mandatory policy, set `input_execution="parallel"` and include
-only checks with `stage="input"`. The engine rejects a parallel policy containing
-output checks. Customer input checks and privacy rewrites still finish before
-dispatch. The mandatory checks inspect each distinct original request, rewritten
-request, and expanded continuation, including recovered plaintext reasoning. They
-use the same bounded classifier executor and request deadline as serial checks.
+The shared completion projection includes assistant text, refusal text, readable
+reasoning, retrieved content, and complete tool arguments. Checks inspect original
+output and any rewrite before release. A text rewrite suppresses alternate output
+channels. Tool arguments are inspected but cannot be rewritten. Generated
+gateway-owned tool calls are checked before execution. Gateway-generated metadata
+and terminal responses are checked while the same accounting entry still owns the
+session; a requested metadata rewrite fails closed because protocol encoders cannot
+apply it safely.
 
-After admission, classification overlaps model generation on host-managed routes.
-Native Chat, Responses, and Messages withhold the response until approval,
-including text, reasoning, tool-call events, replay publication, and continuation
-retention. Approval releases the pending prefix and resumes ordinary streaming;
-it does not wait for the whole completion. This mode performs no mandatory output
-classification and has no 256-byte output-inspection threshold. Customer output
-checks still apply when configured. Client function declarations do not execute
-tools inside the provider and may overlap; their generated calls remain withheld.
+## Failure, replay, and integration
 
-An input block, classifier error, or timeout cancels the upstream request and
-discards its response. The customer budget settlement is zero. Available provider
-usage remains recorded, with incomplete usage marked estimated or unknown under
-the existing disconnect accounting contract. Hosts must honor the trusted
-`input_guardrail_denied` failure detail to release customer holds while retaining
-provider cost evidence. Cancellation cannot undo provider work already performed.
+A confirmed violation returns a sanitized guardrail failure. Protected classifier
+outages and timeouts return `unavailable`, without exposing detector diagnostics or
+claiming that content violated policy. Queues and inflight work remain bounded;
+request removal cancels its pending inspection. Unprotected identity checks may
+observe and continue after uncertain classifier results. Platform policies are
+always protected.
 
-Provider-native tools, provider-server tools, gateway web or tool search, explicit
-cache operations, service-tier requests, and routes containing customer-managed
-credentials wait for approval before dispatch. This avoids unapproved remote
-actions or provider charges outside the platform's billing control. A customer
-cannot select the execution mode or forge the trusted settlement detail.
+Replay keys include the full applicable policy set, execution settings, and revision.
+Change `revision` whenever the detector or external rollout configuration changes.
+Policies are immutable; compose a new engine snapshot when changing adapters.
+Default inspection bounds are 1 MiB, and the same absolute request deadline applies
+throughout inspection and provider execution.
 
-When provider first-token latency exceeds classifier latency, overlap can hide
-most of the input-inspection delay. Otherwise the response waits for the classifier.
-Measure both distributions with the actual detector and workload; local scripted
-classifiers establish ordering and gateway overhead, not GPU inference latency.
+Startup requires `GUARDRAIL_CONTRACT_VERSION=3`. Publish coordinated engine and
+native packages before a downstream host updates its exact release pins. There
+are no synchronous adapter wrappers, alternate mandatory-policy entry points, or
+package-version fallbacks.
 
-## Customer identity policies
+This integration covers native Chat Completions, Responses (including WebSocket
+admission), and Messages. Native Decisions rejects identities with applicable policies
+because its decision payload does not implement the inspection contract.
+Other unsupported surfaces and modalities require explicit
+host fencing before enforcement is enabled. Encrypted reasoning and signatures
+remain opaque. This machinery supplies neither a hosted detector nor evidence of
+model quality, GPU latency, or production rollout.
 
-Identity-scoped guardrails inspect a request after authentication and, when
-configured, inspect the winning completion before any caller byte is delivered.
-They are default-off. Lookup is by authenticated `organization_id` plus
-`identity_id`. A pair with no assigned policy keeps the existing gateway hot
-path: no classifier call, no stream buffering, and no extra native callback.
+## Identity policy configuration
 
-## Data flow
-
-1. Authenticate the virtual key and expand an optional Responses continuation.
-2. Look up at most one immutable policy by organization and identity. Missing
-   policies stop here.
-3. Run the input chain once. The validated or transformed canonical request is
-   reused for route resolution, provider preflight, acceptance, and every
-   waterfall attempt.
-4. Dispatch the provider waterfall. Provider failures remain failover-eligible.
-   A guardrail block, error, or protected-identity fail-closed outcome is
-   terminal and does not advance the waterfall.
-5. Buffer the winning normalized completion when the policy has output checks.
-   Run the output chain once, including tool-call arguments. Then encode,
-   remember a Responses continuation, and publish replay.
-6. Return a sanitized OpenAI-shaped error on failure. Partial blocked output is
-   never exposed.
-
-The native data plane follows the same order. Input enforcement runs after
-Responses continuation expansion and before route resolution, provider
-preflight, ledger acceptance, and attempt start. A block never reaches routing.
-When admission sets `output_guardrail`, Rust buffers the completion and calls
-`enforce_output` once. Unguarded admissions omit that flag and never invoke
-the callback.
+An optional identity policy uses the same schema with both `organization_id` and
+`identity_id` set. An unassigned identity still receives every platform policy.
+Only a request with no applicable policies takes the unguarded path, with no
+classifier call, buffering, or guardrail callback. Local file configuration and
+hosted policy stores must implement the same scoped policy-store contract.
 
 ## Classifier adapters
 
@@ -293,12 +240,9 @@ do not start another worker. Other adapters keep any remaining isolation
 workers. `http_json` still reuses one keep-alive client per isolation loop.
 Native callbacks submit enforcement onto one shared daemon loop so a Rust
 worker can return while an abandoned inspect still occupies an isolation
-worker. Leftover synchronous test adapters, when still needed, run only
-through a private bounded compatibility wrapper. Exhaustion of that wrapper
-cannot take async capacity from healthy adapters. Request bounds count the
+worker. Adapters implement the async contract directly. Request bounds count the
 compact JSON request subject sent to classifiers, including tool definitions,
-structured schemas, and metadata. Response bounds count completion text and
-tool-call arguments.
+structured schemas, and metadata. Response bounds count the serialized completion, including context and tool-call arguments.
 
 ## Privacy
 

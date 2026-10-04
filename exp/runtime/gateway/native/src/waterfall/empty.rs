@@ -73,7 +73,7 @@ pub(super) async fn settle_output_less(
         events.push(Event::Usage(tracked.clone()));
     }
     events.push(terminal.clone());
-    if let Err(failure) = super::inspect_outward(ctx, search_rounds, &events, true).await {
+    if let Err(failure) = super::inspect_outward(ctx, search_rounds, &events).await {
         if !guard
             .settle("failed", usage.as_ref(), &tool_names, Some(&failure), true)
             .await

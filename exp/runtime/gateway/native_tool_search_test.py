@@ -47,8 +47,8 @@ def test_unknown_request_or_missing_state_is_a_protocol_error() -> None:
 
 def test_oversized_search_call_is_unsupported_without_exposing_content() -> None:
     """A generated query cannot execute after it exceeds the inspection contract."""
-    call = WithheldSearchCall("search", "tool_search", "private-marker" * 90_000)
+    call = WithheldSearchCall("search", "tool_search", "private-marker" * 350_000)
     with pytest.raises(GuardrailRejected) as rejected:
-        _search_output("req", [call])
+        _search_output([call])
     assert rejected.value.failure.failure_class is GatewayFailureClass.UNSUPPORTED_CAPABILITY
     assert "private-marker" not in str(rejected.value)

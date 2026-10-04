@@ -32,9 +32,7 @@ from exp.runtime.gateway.execution_resolution import (
     _resolved_wire_profile,
 )
 from exp.runtime.gateway.execution_resolution import alias_native_blockers as alias_native_blockers
-from exp.runtime.gateway.guardrails.contracts import GuardrailPolicy
-from exp.runtime.gateway.guardrails.input_gate import InputGuardrailGate
-from exp.runtime.gateway.guardrails.inspection import GuardrailInspection
+from exp.runtime.gateway.guardrails.session import GuardrailSession
 from exp.runtime.gateway.health import DeploymentHealthKey, DeploymentHealthRegistry
 from exp.runtime.gateway.model_plan import project_stage_selection
 from exp.runtime.gateway.native_fallback_rules import FallbackRules, eligible_depths
@@ -171,8 +169,7 @@ class InflightRequest:
         no_paid_prework: Trusted admission without possible paid prework, default false.
         explicit_cache_state: Private marked-prefix plans and durable operation bindings,
             absent unless a host provides explicit cache spending authority.
-        guardrail_inspection: Request-owned host inspection state, never shared across requests.
-        input_guardrail_gate: Parallel input decision that must approve before release.
+        guardrails: The single request-owned policy and response-release lifecycle.
     """
 
     authorization: AuthorizationSnapshot
@@ -201,9 +198,7 @@ class InflightRequest:
     # Responses-only retention facts consumed by ``remember`` after a
     # successful terminal; chat attempts carry ``None``.
     continuation: ContinuationContext | None = None
-    policy: GuardrailPolicy | None = None
-    guardrail_inspection: GuardrailInspection | None = field(default=None, repr=False)
-    input_guardrail_gate: InputGuardrailGate | None = field(default=None, repr=False)
+    guardrails: GuardrailSession | None = field(default=None, repr=False)
     # One signer per route deployment, for body-signing dialects (Bedrock
     # SigV4); ``None`` at a depth whose dialect serializes its own payload.
     signers: tuple[GatewayDispatchSigner | None, ...] = ()

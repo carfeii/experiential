@@ -1,202 +1,55 @@
-"""JSON-typed native-boundary helpers for input and output enforcement."""
+"""Native callbacks for the shared request-owned guardrail session."""
 
 from __future__ import annotations
 
+import importlib
 import json
-import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Protocol, cast
 
 from exp.common.core.artifacts import JsonObject
-from exp.common.models import BillingSource
-from exp.runtime.gateway.contracts import AuthorizationSnapshot, GatewayRequest
-from exp.runtime.gateway.guardrails.bounded import run_on_native_loop
-from exp.runtime.gateway.guardrails.client import assert_not_internal_classification
+from exp.runtime.gateway.contracts import GatewayRequest
 from exp.runtime.gateway.guardrails.contracts import (
     GuardrailAction,
     GuardrailCompletion,
-    GuardrailPolicy,
     GuardrailRejected,
     GuardrailToolCall,
     OutputGuardrailMode,
 )
-from exp.runtime.gateway.guardrails.deterministic import NativeDetector, native_input_request
-from exp.runtime.gateway.guardrails.enforcement import GuardrailEngine
-from exp.runtime.gateway.guardrails.input_gate import (
-    InputGuardrailGate,
-    denied_input_failure,
-    gate_status,
-    start_input_gate,
-)
-from exp.runtime.gateway.guardrails.inspection import (
-    GuardrailInspection,
-    inspect_argument,
-    open_inspection,
-)
-from exp.runtime.gateway.native_accounting_errors import NativeBridgeError
-from exp.runtime.gateway.routing import GatewayRoute
-from exp.runtime.openai_protocol.errors import public_failure_error
+from exp.runtime.gateway.guardrails.session import GuardrailSession, denied_input_failure
 
 if TYPE_CHECKING:
+    from exp.runtime.gateway.guardrails.enforcement import GuardrailEngine
     from exp.runtime.gateway.native_accounting import NativeAttemptAccounting
 
 
-def inspect_native_input(
-    engine: GuardrailEngine | None,
-    *,
-    authorization: AuthorizationSnapshot,
-    request: GatewayRequest,
-    deadline_monotonic: float,
-    detectors: Mapping[str, NativeDetector] | None = None,
-    defer_mandatory: bool = False,
-) -> tuple[GatewayRequest, GuardrailPolicy | None, GuardrailInspection | None]:
-    """Check original intent and optional rewrites before dispatch or charging.
-
-    Args:
-        engine: Shared engine with optional mandatory and identity policy layers.
-        authorization: Frozen authenticated tenant and identity.
-        request: Canonical request after continuation expansion.
-        deadline_monotonic: Absolute request-wide inspection deadline.
-        detectors: Compiled customer detectors indexed by adapter.
-        defer_mandatory: Start mandatory input-only work at final native admission.
-
-    Returns:
-        The transformed request, customer policy, and fresh host session.
-
-    Raises:
-        GuardrailRejected: Either policy rejected or could not inspect input.
-        GuardrailRecursionError: A classifier re-entered the public route.
-    """
-    session = (
-        None
-        if defer_mandatory
-        else open_inspection(
-            engine,
-            authorization=authorization,
-            request=request,
-            deadline_monotonic=deadline_monotonic,
-        )
-    )
-    transformed, policy = enforce_native_input(
-        engine,
-        authorization=authorization,
-        request=request,
-        deadline_monotonic=deadline_monotonic,
-        detectors=detectors,
-    )
-    if transformed != request and not defer_mandatory:
-        session = open_inspection(
-            engine,
-            authorization=authorization,
-            request=transformed,
-            deadline_monotonic=deadline_monotonic,
-        )
-    return transformed, policy, session
-
-
-def enforce_native_input(
-    engine: GuardrailEngine | None,
-    *,
-    authorization: AuthorizationSnapshot,
-    request: GatewayRequest,
-    deadline_monotonic: float,
-    detectors: Mapping[str, NativeDetector] | None = None,
-) -> tuple[GatewayRequest, GuardrailPolicy | None]:
-    """Apply input enforcement after continuation and before native routing.
-
-    A chain built only from adapters with a compiled native detector runs
-    inline here, so it pays neither the contract projection nor the
-    isolation-worker round trip. Every other chain uses the engine.
-
-    Args:
-        engine: Optional composed engine. ``None`` skips all guardrail work.
-        authorization: Frozen authenticated identity.
-        request: Canonical request after continuation expansion.
-        deadline_monotonic: Remaining request-wide deadline.
-        detectors: Compiled deterministic detectors, keyed by adapter.
-
-    Returns:
-        The validated or transformed request and the assigned policy, if any.
-
-    Raises:
-        GuardrailRejected: The input chain blocked or fail-closed.
-        GuardrailRecursionError: A classifier re-entered the public route.
-    """
-    assert_not_internal_classification()
+def validate_guardrail_engine(engine: GuardrailEngine | None) -> None:
+    """Require the coordinated native guardrail contract before serving guarded traffic."""
     if engine is None:
-        return request, None
-    policy = engine.policy_for(authorization.organization_id, authorization.identity_id)
-    if policy is None:
-        return request, None
-    if detectors:
-        native = native_input_request(
-            policy,
-            detectors,
-            request,
-            monotonic=time.monotonic,
-            deadline_monotonic=deadline_monotonic,
+        return
+    native = importlib.import_module("exp_gateway_native")
+    if getattr(native, "GUARDRAIL_CONTRACT_VERSION", None) != 3:
+        raise ValueError(
+            "guardrails require native GUARDRAIL_CONTRACT_VERSION=3; "
+            "install the coordinated native package"
         )
-        if native is not None:
-            return native, policy
-    return (
-        run_on_native_loop(
-            engine.enforce_input(
-                policy=policy,
-                request=request,
-                deadline_monotonic=deadline_monotonic,
-            )
-        ),
-        policy,
-    )
 
 
 def native_output_mode(
-    engine: GuardrailEngine | None,
-    policy: GuardrailPolicy | None,
+    session: GuardrailSession | None,
     request: GatewayRequest,
     *,
     image_output: bool = False,
     wire_route: Sequence[JsonObject] = (),
-    inspection: GuardrailInspection | None = None,
 ) -> OutputGuardrailMode:
-    """Return the output enforcement shape one admission must use.
-
-    Args:
-        engine: Optional composed engine. ``None`` leaves the stream untouched.
-        policy: Policy resolved during input enforcement, if any.
-        request: Canonical request after continuation expansion.
-        image_output: Any admitted rung may generate image content.
-        wire_route: The admission's wire entries. A rung that may generate
-            images, or whose payload asks its provider for readable reasoning
-            the caller may not have requested (reasoning display defaults),
-            rules out a reasoning-free incremental stream.
-        inspection: Request-owned classifier capabilities resolved by the engine.
-
-    Returns:
-        ``off``, ``buffer``, or ``stream`` for the data plane.
-    """
-    if engine is None:
+    """Choose one output execution strategy for the entire frozen policy set."""
+    if session is None:
         return OutputGuardrailMode.OFF
-    if inspection is not None and inspection.buffers_output:
-        return OutputGuardrailMode.BUFFER
-    mode = engine.output_mode(
-        policy,
-        streaming=request.stream,
-        tools_offered=bool(
-            request.tools or request.provider_native_tools or request.provider_server_tools
-        ),
-        reasoning_text_requested=bool(
-            request.reasoning_summary is not None
-            or request.reasoning_effort is not None
-            or request.thinking_default_enable
-            or upstream_requests_reasoning(wire_route)
-        ),
+    return session.output_mode(
+        request,
+        reasoning=upstream_requests_reasoning(wire_route),
+        images=image_output or any(wire.get("image_output") is True for wire in wire_route),
     )
-
-    image_output = image_output or any(wire.get("image_output") is True for wire in wire_route)
-    if image_output and mode != OutputGuardrailMode.OFF:
-        return OutputGuardrailMode.BUFFER
-    return mode
 
 
 def parse_output_payload(data: JsonObject) -> GuardrailCompletion:
@@ -219,10 +72,14 @@ def parse_output_payload(data: JsonObject) -> GuardrailCompletion:
             arguments = item.get("arguments") or item.get("raw_arguments") or ""
             if isinstance(call_id, str) and isinstance(name, str) and isinstance(arguments, str):
                 calls.append(GuardrailToolCall(call_id=call_id, name=name, arguments=arguments))
+    raw_context = data.get("context", [])
+    if not isinstance(raw_context, list) or any(not isinstance(item, str) for item in raw_context):
+        raise GuardrailRejected(denied_input_failure())
     return GuardrailCompletion(
         text=str(data.get("text") or ""),
         refusal=bool(data.get("refusal")),
         tool_calls=tuple(calls),
+        context=tuple(str(item) for item in raw_context),
     )
 
 
@@ -232,7 +89,7 @@ def encode_output_decision(
     replacement_text: str | None = None,
     failure: JsonObject | None = None,
 ) -> str:
-    """Encode one native output decision without request content."""
+    """Encode a release decision with sanitized failure metadata."""
     payload: JsonObject = {"action": action}
     if replacement_text is not None:
         payload["replacement_text"] = replacement_text
@@ -241,131 +98,48 @@ def encode_output_decision(
     return json.dumps(payload, separators=(",", ":"))
 
 
-def _guardrail_failure_payload(safe_message: str, failure_class: str = "guardrail") -> JsonObject:
-    """Return one sanitized failure body for a native decision."""
-    return {"failure_class": failure_class, "safe_message": safe_message}
-
-
-def _settled_bytes(data: JsonObject) -> int:
-    """Return how many provider completion bytes already left the buffer."""
-    value = data.get("settled_bytes")
-    return value if isinstance(value, int) else 0
-
-
-def enforce_native_output_segment(
-    engine: GuardrailEngine | None,
-    policy: GuardrailPolicy | None,
-    argument: str,
-    *,
-    deadline_monotonic: float,
-) -> str:
-    """Redact and release the settled part of one streamed completion tail.
-
-    The data plane owns the buffer: it presents the tail it is holding and
-    receives back the text it may send now plus the text it must keep. The
-    call is synchronous on the caller's thread, because a deterministic
-    redactor is bounded CPU work and any hop would reintroduce the latency
-    this path exists to remove.
-
-    Args:
-        engine: Optional composed engine.
-        policy: Policy captured at admission. ``None`` means unguarded.
-        argument: JSON object with ``pending``, ``final``, and
-            ``settled_bytes``.
-        deadline_monotonic: Remaining request-wide deadline.
-
-    Returns:
-        JSON decision with ``action`` plus either ``release``, ``pending``,
-        and ``flagged``, or a sanitized ``failure``.
-    """
+def enforce_native_output_segment(session: GuardrailSession | None, argument: str) -> str:
+    """Apply the session's deterministic streaming strategy before releasing bytes."""
     data = cast(JsonObject, json.loads(argument))
-    if engine is None or policy is None:
-        return _encode_segment_failure(
-            _guardrail_failure_payload("A gateway guardrail could not complete this request.")
-        )
     try:
-        segment = engine.release_output_segment(
-            policy=policy,
+        if session is None:
+            raise GuardrailRejected(denied_input_failure())
+        value = data.get("settled_bytes")
+        segment = session.release_output_segment(
             pending=str(data.get("pending") or ""),
             final=bool(data.get("final")),
-            settled_bytes=_settled_bytes(data),
-            deadline_monotonic=deadline_monotonic,
+            settled_bytes=value if isinstance(value, int) else 0,
         )
     except GuardrailRejected as exc:
-        return _encode_segment_failure(
-            _guardrail_failure_payload(exc.failure.safe_message, exc.failure.failure_class.value)
+        return encode_output_decision(
+            action=str(exc.failure.safe_details.get("action", "error")),
+            failure=exc.failure.model_dump(mode="json"),
         )
     return json.dumps(
         {
-            "action": GuardrailAction.ALLOW.value,
+            "action": "allow",
             "release": segment.release,
             "pending": segment.pending,
             "flagged": segment.flagged,
-        },
-        separators=(",", ":"),
+        }
     )
 
 
-def _encode_segment_failure(failure: JsonObject) -> str:
-    """Encode one fail-closed streaming decision that releases nothing."""
-    return json.dumps(
-        {"action": GuardrailAction.ERROR.value, "failure": failure},
-        separators=(",", ":"),
-    )
-
-
-def enforce_native_output(
-    engine: GuardrailEngine | None,
-    policy: GuardrailPolicy | None,
-    argument: str,
-    *,
-    deadline_monotonic: float,
-) -> str:
-    """Run the output chain once for a native buffered completion.
-
-    Args:
-        engine: Optional composed engine.
-        policy: Policy captured at admission. ``None`` means unguarded.
-        argument: JSON object with the winning completion fields.
-        deadline_monotonic: Remaining request-wide deadline.
-
-    Returns:
-        JSON decision with ``action``, optional ``replacement_text``, and
-        optional sanitized ``failure``.
-    """
-    if engine is None or policy is None:
-        return encode_output_decision(
-            action=GuardrailAction.ERROR.value,
-            failure={
-                "failure_class": "guardrail",
-                "safe_message": "A gateway guardrail could not complete this request.",
-            },
-        )
-    if not policy.output_checks:
-        return encode_output_decision(action=GuardrailAction.ALLOW.value)
-    data = cast(JsonObject, json.loads(argument))
-    completion = parse_output_payload(data)
+def enforce_native_output(session: GuardrailSession | None, argument: str) -> str:
+    """Apply every scoped policy to the same buffered completion before releasing it."""
     try:
-        result = run_on_native_loop(
-            engine.enforce_output(
-                policy=policy,
-                completion=completion,
-                deadline_monotonic=deadline_monotonic,
-            )
-        )
+        if session is None:
+            raise GuardrailRejected(denied_input_failure())
+        completion = parse_output_payload(cast(JsonObject, json.loads(argument)))
+        result = session.inspect_output(completion)
     except GuardrailRejected as exc:
-        failure = exc.failure
         return encode_output_decision(
-            action=str(failure.safe_details.get("action") or GuardrailAction.ERROR.value),
-            failure={
-                "failure_class": failure.failure_class.value,
-                "safe_message": failure.safe_message,
-            },
+            action=str(exc.failure.safe_details.get("action", "error")),
+            failure=exc.failure.model_dump(mode="json"),
         )
-    if result.text != completion.text:
+    if result != completion:
         return encode_output_decision(
-            action=GuardrailAction.MODIFY.value,
-            replacement_text=result.text,
+            action=GuardrailAction.MODIFY.value, replacement_text=result.text
         )
     return encode_output_decision(action=GuardrailAction.ALLOW.value)
 
@@ -397,159 +171,37 @@ def upstream_requests_reasoning(wire_route: Sequence[JsonObject]) -> bool:
 
 
 class _GuardrailPlane(Protocol):
-    """The typed accounting and policy seams used by native output callbacks."""
+    """Accounting is the sole owner of each admitted request's session."""
 
     _accounting: NativeAttemptAccounting
-    _guardrails: GuardrailEngine | None
 
 
 class NativeGuardrailsMixin:
-    """Native output callbacks bound to the admitted request's frozen policy."""
-
-    def prepare_parallel_input(
-        self: _GuardrailPlane,
-        authorization: AuthorizationSnapshot,
-        route: GatewayRoute,
-        subjects: tuple[GatewayRequest, ...],
-        deadline: float,
-        *,
-        parallel: bool,
-        has_cache: bool,
-    ) -> InputGuardrailGate | None:
-        """Start input-only inspection, keeping customer-funded and cache work serial."""
-        if not parallel or self._guardrails is None:
-            return None
-        gate = start_input_gate(self._guardrails, authorization, subjects, deadline)
-        if not has_cache and all(
-            deployment.billing_source is BillingSource.HOST_MANAGED
-            for deployment in route.deployments
-        ):
-            return gate
-        try:
-            gate.future.result(timeout=max(0, deadline - time.monotonic()))
-        except Exception:  # noqa: BLE001 - preserve only the sanitized engine failure.
-            # A late allow may race the blocking wait's deadline. The wait
-            # still failed, so terminalize admission rather than orphaning it.
-            failure = gate.settlement_failure() or denied_input_failure()
-            gate.cancel()
-            self._accounting.finish_request_quietly(authorization, failure)
-            raise NativeBridgeError(public_failure_error(failure)) from None
-        return None
+    """Resolve native operations to one frozen session, independent of policy scope."""
 
     def guardrail_input_status(self: _GuardrailPlane, argument: str) -> str:
-        """Poll one request-owned input decision without tying up a bridge worker."""
+        """Poll approval without tying up a bridge worker or authorizing a closed request."""
         request_id = str(json.loads(argument).get("request_id") or "")
         entry = self._accounting.entry(request_id)
         if entry is None:
             return '{"action":"closed"}'
-        status = gate_status(entry.input_guardrail_gate)
-        return status if self._accounting.entry(request_id) is entry else '{"action":"closed"}'
-
-    def reopen_guardrail_inspection(
-        self: _GuardrailPlane,
-        authorization: AuthorizationSnapshot,
-        request: GatewayRequest,
-        deadline: float,
-    ) -> GuardrailInspection | None:
-        """Inspect authenticated plaintext after sealed-history expansion.
-
-        Args:
-            authorization: Authenticated request authority.
-            request: Full request with authenticated plaintext history.
-            deadline: Original absolute request deadline.
-
-        Returns:
-            A fresh session for the actual provider-bound context.
-
-        Raises:
-            NativeBridgeError: The policy rejected or failed to inspect input.
-        """
-        try:
-            return open_inspection(
-                self._guardrails,
-                authorization=authorization,
-                request=request,
-                deadline_monotonic=deadline,
-            )
-        except GuardrailRejected as exc:
-            raise NativeBridgeError(public_failure_error(exc.failure)) from None
-
-    def inspect_admitted_guardrails(
-        self: _GuardrailPlane,
-        authorization: AuthorizationSnapshot,
-        request: GatewayRequest,
-        deadline: float,
-    ) -> GuardrailInspection | None:
-        """Reinspect a search-expanded request and finalize any admitted rejection.
-
-        Args:
-            authorization: Authority of the already accepted request.
-            request: Exact request after gateway search and tool planning.
-            deadline: Original absolute request deadline.
-
-        Returns:
-            A fresh session bound to all provider-bound context.
-
-        Raises:
-            NativeBridgeError: Inspection rejected the request before provider dispatch.
-        """
-        try:
-            return open_inspection(
-                self._guardrails,
-                authorization=authorization,
-                request=request,
-                deadline_monotonic=deadline,
-            )
-        except GuardrailRejected as exc:
-            self._accounting.finish_request_quietly(authorization, exc.failure)
-            raise NativeBridgeError(public_failure_error(exc.failure)) from None
+        decision = (
+            {"action": "error", "failure": denied_input_failure().model_dump(mode="json")}
+            if entry.guardrails is None
+            else entry.guardrails.input_decision()
+        )
+        return (
+            json.dumps(decision)
+            if self._accounting.entry(request_id) is entry
+            else '{"action":"closed"}'
+        )
 
     def enforce_output_segment(self: _GuardrailPlane, argument: str) -> str:
-        """Release the settled part of one streamed customer-redaction tail.
-
-        Args:
-            argument: Native JSON payload containing the admitted request ID.
-
-        Returns:
-            A native JSON decision bound to that entry's policy and deadline.
-        """
+        """Release one deterministic segment through the admitted session."""
         entry = self._accounting.entry(str(json.loads(argument).get("request_id") or ""))
-        policy = None if entry is None else entry.policy
-        deadline = time.monotonic() if entry is None else entry.deadline_monotonic
-        return enforce_native_output_segment(
-            self._guardrails, policy, argument, deadline_monotonic=deadline
-        )
-
-    def inspect_guardrail_output(self: _GuardrailPlane, argument: str) -> str:
-        """Inspect a pending segment through its exact admitted request session.
-
-        Args:
-            argument: Native JSON payload containing the admitted request ID.
-
-        Returns:
-            A native JSON decision bound to that entry's policy and deadline.
-        """
-        return inspect_argument(self._accounting, argument)
+        return enforce_native_output_segment(None if entry is None else entry.guardrails, argument)
 
     def enforce_output(self: _GuardrailPlane, argument: str) -> str:
-        """Run a customer output-chain callback for a buffered completion.
-
-        Args:
-            argument: Native JSON payload containing the admitted request ID.
-
-        Returns:
-            A native JSON decision bound to that entry's policy and deadline.
-        """
-        data = json.loads(argument)
-        request_id = str(data.get("request_id") or "")
-        entry = self._accounting.entry(request_id)
-        policy = None if entry is None else entry.policy
-        deadline = time.monotonic() if entry is None else entry.deadline_monotonic
-        if entry is not None and policy is None and entry.guardrail_inspection is not None:
-            return encode_output_decision(action=GuardrailAction.ALLOW.value)
-        return enforce_native_output(
-            self._guardrails,
-            policy,
-            argument,
-            deadline_monotonic=deadline,
-        )
+        """Inspect one complete output through the admitted session."""
+        entry = self._accounting.entry(str(json.loads(argument).get("request_id") or ""))
+        return enforce_native_output(None if entry is None else entry.guardrails, argument)

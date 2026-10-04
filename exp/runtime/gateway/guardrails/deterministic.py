@@ -19,7 +19,12 @@ from collections.abc import Callable, Mapping
 from typing import Protocol
 
 from exp.common.core.artifacts import JsonObject
-from exp.runtime.gateway.contracts import GatewayMessage, GatewayRequest
+from exp.runtime.gateway.contracts import (
+    GatewayFailure,
+    GatewayFailureClass,
+    GatewayMessage,
+    GatewayRequest,
+)
 from exp.runtime.gateway.guardrails.contracts import (
     GuardrailAction,
     GuardrailCheck,
@@ -28,7 +33,7 @@ from exp.runtime.gateway.guardrails.contracts import (
     guardrail_failure,
     request_content_bytes,
 )
-from exp.runtime.gateway.guardrails.enforcement import restored_provider_authority
+from exp.runtime.gateway.guardrails.redaction import restored_provider_authority
 
 _logger = logging.getLogger(__name__)
 
@@ -65,10 +70,7 @@ def compile_native_detectors(specifications: Mapping[str, str]) -> dict[str, Nat
     """
     if not specifications:
         return {}
-    try:
-        native = importlib.import_module("exp_gateway_native")
-    except ModuleNotFoundError:
-        return {}
+    native = importlib.import_module("exp_gateway_native")
     detectors: dict[str, NativeDetector] = {}
     for adapter_id, specification in specifications.items():
         try:
@@ -209,15 +211,19 @@ def _applied(
 
 
 def _uncertain(policy: GuardrailPolicy, check: GuardrailCheck) -> None:
-    """Fail closed for a protected identity, or skip the uncertain check.
+    """Fail closed for a protected policy, or skip the uncertain check.
 
     Raises:
-        GuardrailRejected: The identity is protected.
+        GuardrailRejected: The policy is protected.
     """
     _record(policy, check, GuardrailAction.ERROR)
     if policy.protected:
         raise GuardrailRejected(
-            guardrail_failure(action=GuardrailAction.ERROR, check_id=check.check_id)
+            GatewayFailure(
+                failure_class=GatewayFailureClass.UNAVAILABLE,
+                safe_message="Content inspection is unavailable. Retry later.",
+                safe_details={"action": "error", "check_id": check.check_id},
+            )
         )
 
 

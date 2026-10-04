@@ -76,12 +76,7 @@ pub(super) async fn stream_response(
         let mut replayable = lease.is_some();
         // Deterministic output redaction as bytes flow: only the trailing
         // window the detector cannot yet decide about is withheld.
-        let mut output_guardrails = StreamGuardrails::new(
-            &request_id,
-            incremental_guardrail,
-            admission.guardrail_inspection,
-            deadline,
-        );
+        let mut output_guardrails = StreamGuardrails::new(&request_id, incremental_guardrail);
 
         macro_rules! fail_stream {
             ($failure:expr) => {{

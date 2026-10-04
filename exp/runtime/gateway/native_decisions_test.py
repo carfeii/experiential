@@ -48,6 +48,7 @@ from exp.runtime.gateway.tests.chain_authority_fixture_test import (
     chain_components,
     publish_authored_chain_fixture,
 )
+from exp.runtime.gateway.tests.parallel_input_guardrails_test import _Classifier, _engine
 from exp.runtime.models.providers.base import GatewayWireProfile
 from exp.runtime.models.providers.typesafe import TypeSafeClient
 
@@ -245,7 +246,7 @@ def test_admit_decisions_preserves_questions_native_wire_and_reservation(tmp_pat
     assert entry.request.input_token_reservation > 0
     assert entry.request.output_token_reservation > 0
     assert entry.continuation is None
-    assert entry.policy is None
+    assert entry.guardrails is None
     assert entry.throttle_redial_budgets == (0,)
     assert raw_key not in json.dumps(admitted)
 
@@ -469,3 +470,17 @@ def test_decision_alias_rejects_chat_before_provider_payload(tmp_path: Path) -> 
     assert _public_error(raised.value)["status_code"] == 400
     assert _public_error(raised.value)["code"] == "unsupported_capability"
     assert _rows(control) == [("chat_completions", "failed")]
+
+
+def test_configured_guardrails_refuse_uninspectable_decisions_before_acceptance(
+    tmp_path: Path,
+) -> None:
+    """Switching to a non-text surface cannot bypass an applicable operator policy."""
+    control, raw_key = _control_plane(tmp_path)
+    detector = _Classifier("allow")
+    control._guardrails = _engine(detector)
+    with pytest.raises(NativeBridgeError) as error:
+        _admit(control, raw_key)
+    assert _public_error(error.value)["code"] == "unsupported_capability"
+    assert _rows(control) == []
+    assert not detector.requests

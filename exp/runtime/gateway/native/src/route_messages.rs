@@ -229,12 +229,12 @@ pub(crate) async fn messages(
         output_less_retention: None,
         output_token_cap: admission.maximum_output_tokens,
         tool_search: admission.tool_search.as_ref(),
-        inspection: admission
-            .guardrail_inspection
-            .then_some(crate::waterfall::InspectionContext {
+        output_guardrails: admission.output_guardrail.enforces().then_some(
+            crate::waterfall::OutputGuardrailContext {
                 web_search: admission.web_search.as_ref(),
                 responses: false,
-            }),
+            },
+        ),
     };
     let mut won =
         acquire_guarded_attempt(&context, &mut guard, admission.guardrail_input_pending).await;
@@ -661,12 +661,7 @@ async fn stream_messages(
         let mut terminal: Option<Event> = None;
         // Deterministic output redaction as bytes flow: only the trailing
         // window the detector cannot yet decide about is withheld.
-        let mut output_guardrails = StreamGuardrails::new(
-            &request_id,
-            incremental_guardrail,
-            admission.guardrail_inspection,
-            deadline,
-        );
+        let mut output_guardrails = StreamGuardrails::new(&request_id, incremental_guardrail);
         let mut empty_completion = false;
 
         macro_rules! fail_stream {

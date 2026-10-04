@@ -33,10 +33,8 @@ from exp.runtime.gateway.guardrails.contracts import (
 from exp.runtime.gateway.guardrails.enforcement import GuardrailEngine
 from exp.runtime.gateway.guardrails.native import (
     encode_output_decision,
-    enforce_native_input,
     enforce_native_output,
     enforce_native_output_segment,
-    inspect_native_input,
     native_output_mode,
     parse_output_payload,
     upstream_requests_reasoning,
@@ -46,6 +44,7 @@ from exp.runtime.gateway.guardrails.regex import (
     RegexAdapterDocument,
     RegexClassifier,
 )
+from exp.runtime.gateway.guardrails.session import GuardrailSession
 from exp.runtime.gateway.guardrails.store import MappingGuardrailStore
 from exp.runtime.gateway.tests.mandatory_guardrails_test import _Guard
 
@@ -108,6 +107,35 @@ def _engine() -> GuardrailEngine:
     )
 
 
+def _inspect_input(
+    engine: GuardrailEngine | None,
+    *,
+    authorization: AuthorizationSnapshot,
+    request: GatewayRequest,
+    deadline_monotonic: float,
+) -> tuple[GatewayRequest, GuardrailSession | None]:
+    """Open the request lifecycle and perform its input phase."""
+    session = (
+        None
+        if engine is None
+        else engine.open_request(authorization, deadline_monotonic=deadline_monotonic)
+    )
+    return (request if session is None else session.inspect_input(request), session)
+
+
+def _session(
+    engine: GuardrailEngine | None, policy: GuardrailPolicy | None, deadline: float = 200.0
+) -> GuardrailSession | None:
+    """Bind an explicit output policy fixture to the common lifecycle."""
+    return (
+        None
+        if engine is None or policy is None
+        else GuardrailSession(
+            engine, (policy.model_copy(update={"checks": policy.output_checks}),), deadline
+        )
+    )
+
+
 def test_unguarded_native_input_does_not_call_classifiers() -> None:
     """No engine, or no assigned policy, leaves the request unchanged."""
     request = GatewayRequest(
@@ -115,7 +143,7 @@ def test_unguarded_native_input_does_not_call_classifiers() -> None:
         messages=(GatewayMessage(role="user", content="hello"),),
     )
 
-    unchanged, policy = enforce_native_input(
+    unchanged, policy = _inspect_input(
         None,
         authorization=_authorization(),
         request=request,
@@ -156,7 +184,7 @@ def test_mandatory_policy_checks_customer_rewrites_before_dispatch() -> None:
             )
         },
     )
-    transformed, _, session = inspect_native_input(
+    transformed, session = _inspect_input(
         engine,
         authorization=_authorization(),
         request=request,
@@ -164,8 +192,8 @@ def test_mandatory_policy_checks_customer_rewrites_before_dispatch() -> None:
     )
     assert transformed.messages == replacement
     assert [item.messages for item in engine.requests] == [request.messages, replacement]
-    assert len(engine.sessions) == 2
-    assert session is not None and session.sessions[0][1] is engine.sessions[-1]
+    assert session is not None
+    assert len(session.policies) == 2
 
 
 def test_native_input_runs_the_async_chain_on_a_private_loop() -> None:
@@ -176,7 +204,7 @@ def test_native_input_runs_the_async_chain_on_a_private_loop() -> None:
         messages=(GatewayMessage(role="user", content="hello"),),
     )
 
-    rewritten, policy = enforce_native_input(
+    rewritten, policy = _inspect_input(
         engine,
         authorization=_authorization(),
         request=request,
@@ -222,7 +250,7 @@ def test_customer_rewrite_cannot_erase_or_introduce_blocked_intent(blocked_stage
             ),
         )
     )
-    policy = _engine().policy_for("organization-one", "identity-one")
+    policy = _engine().policies_for("organization-one", "identity-one")[0]
     assert policy is not None
     policy = policy.model_copy(
         update={
@@ -233,7 +261,7 @@ def test_customer_rewrite_cannot_erase_or_introduce_blocked_intent(blocked_stage
     )
     engine = IntentGuard(policies=(policy,), adapters={"scripted": customer})
     with pytest.raises(GuardrailRejected) as rejected:
-        inspect_native_input(
+        _inspect_input(
             engine,
             authorization=_authorization(),
             request=request,
@@ -260,13 +288,10 @@ def test_native_output_payload_round_trips_tool_calls() -> None:
 def test_native_output_block_returns_sanitized_failure_json() -> None:
     """A blocked output chain returns action plus a content-free failure."""
     engine = _engine()
-    policy = engine.policy_for("organization-one", "identity-one")
+    policy = engine.policies_for("organization-one", "identity-one")[0]
     decision = json.loads(
         enforce_native_output(
-            engine,
-            policy,
-            json.dumps({"text": "unsafe", "tool_calls": []}),
-            deadline_monotonic=200.0,
+            _session(engine, policy, 200.0), json.dumps({"text": "unsafe", "tool_calls": []})
         )
     )
 
@@ -278,12 +303,7 @@ def test_native_output_block_returns_sanitized_failure_json() -> None:
 def test_missing_policy_on_output_callback_fail_closes() -> None:
     """Invoking the output callback without a captured policy is a terminal error."""
     decision = json.loads(
-        enforce_native_output(
-            None,
-            None,
-            json.dumps({"text": "ok"}),
-            deadline_monotonic=200.0,
-        )
+        enforce_native_output(_session(None, None, 200.0), json.dumps({"text": "ok"}))
     )
 
     assert decision["action"] == "error"
@@ -380,7 +400,7 @@ def test_native_callback_returns_while_adapter_ignores_cancellation() -> None:
     try:
         started = time.monotonic()
         with pytest.raises(GuardrailRejected):
-            enforce_native_input(
+            _inspect_input(
                 engine,
                 authorization=_authorization(),
                 request=request,
@@ -392,7 +412,7 @@ def test_native_callback_returns_while_adapter_ignores_cancellation() -> None:
 
         started = time.monotonic()
         with pytest.raises(GuardrailRejected):
-            enforce_native_input(
+            _inspect_input(
                 engine,
                 authorization=_authorization(),
                 request=request,
@@ -404,7 +424,7 @@ def test_native_callback_returns_while_adapter_ignores_cancellation() -> None:
 
         healthy_auth = _authorization().model_copy(update={"identity_id": "identity-healthy"})
         started = time.monotonic()
-        rewritten, policy = enforce_native_input(
+        rewritten, policy = _inspect_input(
             engine,
             authorization=healthy_auth,
             request=request,
@@ -427,15 +447,13 @@ def test_output_segment_without_an_engine_fails_closed() -> None:
     """An unguarded process cannot release bytes through the streaming seam."""
     decision = json.loads(
         enforce_native_output_segment(
-            None,
-            None,
+            _session(None, None, 1e12),
             json.dumps({"pending": "text", "final": True, "settled_bytes": 0}),
-            deadline_monotonic=1e12,
         )
     )
     assert decision["action"] == "error"
     assert "release" not in decision
-    assert decision["failure"]["failure_class"] == "guardrail"
+    assert decision["failure"]["failure_class"] == "unavailable"
 
 
 def test_output_segment_releases_redacted_text() -> None:
@@ -473,15 +491,20 @@ def test_output_segment_releases_redacted_text() -> None:
         messages=(GatewayMessage(role="user", content="Draw"),),
         stream=True,
     )
-    assert native_output_mode(engine, policy, request) == OutputGuardrailMode.STREAM
     assert (
-        native_output_mode(engine, policy, request, image_output=True) == OutputGuardrailMode.BUFFER
+        native_output_mode(_session(engine, policy, 200.0), request) == OutputGuardrailMode.STREAM
     )
-    assert native_output_mode(engine, None, request, image_output=True) == OutputGuardrailMode.OFF
+    assert (
+        native_output_mode(_session(engine, policy, 200.0), request, image_output=True)
+        == OutputGuardrailMode.BUFFER
+    )
+    assert (
+        native_output_mode(_session(engine, None, 200.0), request, image_output=True)
+        == OutputGuardrailMode.OFF
+    )
     decision = json.loads(
         enforce_native_output_segment(
-            engine,
-            policy,
+            _session(engine, policy, 1e12),
             json.dumps(
                 {
                     "pending": "mail ada@example.com now " + "y" * 200 + " done ",
@@ -489,7 +512,6 @@ def test_output_segment_releases_redacted_text() -> None:
                     "settled_bytes": 0,
                 }
             ),
-            deadline_monotonic=1e12,
         )
     )
     assert decision["action"] == "allow"

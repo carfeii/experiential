@@ -14,8 +14,6 @@ from exp.runtime.gateway.guardrails.contracts import (
     GuardrailCompletion,
 )
 from exp.runtime.gateway.guardrails.streaming import (
-    ClassifierOutputSession,
-    IncrementalClassifier,
     StreamableClassifier,
     StreamingRedactor,
 )
@@ -49,28 +47,6 @@ class InspectingClassifier(Protocol):
         check: GuardrailCheck,
     ) -> Awaitable[ClassifierVerdict]:
         """Inspect one winning completion."""
-        ...
-
-
-class SyncInspectingClassifier(Protocol):
-    """Leftover synchronous detector used only through ``BoundedSyncClassifier``."""
-
-    def inspect_input(
-        self,
-        *,
-        request: GatewayRequest,
-        check: GuardrailCheck,
-    ) -> ClassifierVerdict:
-        """Inspect one canonical request on the caller's thread."""
-        ...
-
-    def inspect_output(
-        self,
-        *,
-        completion: GuardrailCompletion,
-        check: GuardrailCheck,
-    ) -> ClassifierVerdict:
-        """Inspect one winning completion on the caller's thread."""
         ...
 
 
@@ -167,20 +143,6 @@ class DirectClassifierClient:
         if not isinstance(adapter, StreamableClassifier):
             return None
         return adapter.stream_redactor()
-
-    async def open_output_session(
-        self, *, request: GatewayRequest, check: GuardrailCheck
-    ) -> ClassifierOutputSession | None:
-        """Resolve an adapter's optional request-owned streaming capability.
-
-        Adapters without this capability retain full-completion inspection.
-        Session creation runs under the same recursion guard as ordinary checks.
-        """
-        adapter = self._registry.require(check.adapter_id)
-        if not isinstance(adapter, IncrementalClassifier):
-            return None
-        with classification_scope():
-            return await adapter.open_output_session(request=request, check=check)
 
 
 class ClassifierLookup(Protocol):

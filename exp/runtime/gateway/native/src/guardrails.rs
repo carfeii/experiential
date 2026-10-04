@@ -1,4 +1,4 @@
-//! Output-chain enforcement for mandatory and identity-scoped guardrails.
+//! Output execution strategies for the shared guardrail pipeline.
 //!
 //! Rust owns buffering and delivery. A chain whose checks all bind
 //! deterministic detectors runs natively through `plan`, with the compiled
@@ -10,13 +10,11 @@
 
 pub mod detector;
 pub(crate) mod input;
-pub(crate) mod inspection;
 pub mod plan;
 mod syntax;
 
 use serde::Deserialize;
-use serde_json::{json, Value};
-use std::time::Instant;
+use serde_json::json;
 
 use crate::bridge::Bridge;
 use crate::errors::{Failure, FailureClass};
@@ -25,30 +23,27 @@ use crate::events::Event;
 /// Shared streamed-output enforcement for deterministic and model-backed checks.
 pub(crate) struct StreamGuardrails {
     redactor: Option<StreamRedactor>,
-    inspector: Option<inspection::StreamInspector>,
 }
 
 impl StreamGuardrails {
-    pub(crate) fn new(request_id: &str, redact: bool, inspect: bool, deadline: Instant) -> Self {
+    pub(crate) fn new(request_id: &str, redact: bool) -> Self {
         Self {
             redactor: redact.then(|| StreamRedactor::new(request_id)),
-            inspector: inspect.then(|| inspection::StreamInspector::new(request_id, deadline)),
         }
     }
 
     pub(crate) fn enabled(&self) -> bool {
-        self.redactor.is_some() || self.inspector.is_some()
+        self.redactor.is_some()
     }
 
-    /// No route may emit a customer rewrite before the mandatory checks authorize it.
+    /// Release only the prefix that the deterministic classifier has fully decided.
     pub(crate) async fn release(
         &mut self,
         bridge: &Bridge,
         event: Event,
         terminal: bool,
     ) -> Result<Vec<Event>, Failure> {
-        let events = released_events(self.redactor.as_mut(), bridge, event, terminal).await?;
-        inspection::inspect_events(self.inspector.as_mut(), bridge, events).await
+        released_events(self.redactor.as_mut(), bridge, event, terminal).await
     }
 }
 
@@ -82,32 +77,79 @@ fn decision_failure(decision: &OutputDecision) -> Failure {
     })
 }
 
-/// Project collected events into the JSON payload Python inspects once.
-pub fn output_argument(request_id: &str, events: &[Event]) -> String {
-    let mut text = String::new();
-    let mut refusal = false;
-    let mut tool_calls: Vec<Value> = Vec::new();
+/// The normalized output inspected by both native and Python classifier strategies.
+#[derive(serde::Serialize)]
+pub(super) struct Completion {
+    pub text: String,
+    pub refusal: bool,
+    pub tool_calls: Vec<ToolCall>,
+    pub context: Vec<String>,
+}
+
+/// A complete generated tool invocation, including its exact arguments.
+#[derive(serde::Serialize)]
+pub(super) struct ToolCall {
+    pub call_id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+/// Project every readable output channel once for all classifier strategies.
+pub(super) fn projection(events: &[Event]) -> Completion {
+    let mut result = Completion {
+        text: String::new(),
+        refusal: false,
+        tool_calls: Vec::new(),
+        context: Vec::new(),
+    };
+    let mut refusal_text = String::new();
+    let mut reasoning_text = String::new();
     for event in events {
         match event {
             Event::TextDelta(delta) | Event::ProviderTextDelta { delta, .. } => {
-                text.push_str(delta);
+                result.text.push_str(delta)
             }
-            Event::RefusalDelta(_) | Event::ProviderRefusalDelta { .. } => refusal = true,
-            Event::ToolCallCompleted { call, .. } => {
-                tool_calls.push(json!({
-                    "call_id": call.call_id,
-                    "name": call.name,
-                    "arguments": call.raw_arguments,
-                }));
+            Event::RefusalDelta(delta) | Event::ProviderRefusalDelta { delta, .. } => {
+                result.refusal = true;
+                refusal_text.push_str(delta);
+            }
+            Event::ReasoningTextDelta(delta)
+            | Event::ReasoningContentDelta { delta, .. }
+            | Event::ThinkingDelta { delta, .. }
+            | Event::ReasoningSummaryDelta { delta, .. } => reasoning_text.push_str(delta),
+            Event::ServerToolResult { block, .. } => result.context.push(block.clone()),
+            Event::HostedToolItemStarted { item, .. }
+            | Event::HostedToolItemCompleted { item, .. } => result.context.push(item.clone()),
+            Event::HostedToolItemProgress { payload, .. } => result.context.push(payload.clone()),
+            Event::ProviderTextAnnotation { annotation, .. } => {
+                result.context.push(annotation.clone())
+            }
+            Event::CitationDelta { citation, .. } => result.context.push(citation.clone()),
+            Event::ToolCallCompleted { call, .. } | Event::ServerToolUseCompleted { call, .. } => {
+                result.tool_calls.push(ToolCall {
+                    call_id: call.call_id.clone(),
+                    name: call.name.clone(),
+                    arguments: call.raw_arguments.clone(),
+                });
             }
             _ => {}
         }
     }
+    if !refusal_text.is_empty() {
+        result.context.push(refusal_text);
+    }
+    if !reasoning_text.is_empty() {
+        result.context.push(reasoning_text);
+    }
+    result
+}
+
+/// Bind the shared output projection to the request that owns its frozen policy.
+pub fn output_argument(request_id: &str, events: &[Event]) -> String {
+    let completion = projection(events);
     crate::encode::compact_json(&json!({
-        "request_id": request_id,
-        "text": text,
-        "refusal": refusal,
-        "tool_calls": tool_calls,
+        "request_id": request_id, "text": completion.text, "refusal": completion.refusal,
+        "tool_calls": completion.tool_calls, "context": completion.context,
     }))
 }
 
@@ -498,6 +540,7 @@ mod tests {
     use super::*;
     use crate::events::CompletedToolCall;
     use pyo3::types::PyAnyMethods;
+    use serde_json::Value;
 
     #[test]
     fn output_argument_is_content_shaped_and_request_keyed() {

@@ -225,12 +225,12 @@ pub(crate) async fn chat(
         output_less_retention: None,
         output_token_cap: admission.maximum_output_tokens,
         tool_search: admission.tool_search.as_ref(),
-        inspection: admission
-            .guardrail_inspection
-            .then_some(crate::waterfall::InspectionContext {
+        output_guardrails: admission.output_guardrail.enforces().then_some(
+            crate::waterfall::OutputGuardrailContext {
                 web_search: admission.web_search.as_ref(),
                 responses: false,
-            }),
+            },
+        ),
     };
     let mut won =
         acquire_guarded_attempt(&context, &mut guard, admission.guardrail_input_pending).await;

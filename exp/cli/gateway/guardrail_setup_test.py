@@ -149,7 +149,7 @@ def test_explicit_standard_opt_in_authors_one_shared_adapter(tmp_path: Path) -> 
     assert set(policy["capability_adapters"].values()) == {adapter_id}
     engine = load_guardrail_engine(tmp_path)
     assert engine is not None
-    loaded = engine.policy_for(_ORG, _IDENTITY)
+    loaded = engine.policies_for(_ORG, _IDENTITY)[0]
     assert loaded is not None
     assert loaded.protected is True
     assert len(loaded.checks) == len(STANDARD_PRESET_STEPS)
@@ -399,7 +399,7 @@ def test_non_owned_standard_looking_policy_is_custom(tmp_path: Path) -> None:
     engine = engine_from_document(
         json.loads(guardrail_config_path(tmp_path).read_text(encoding="utf-8"))
     )
-    policy = engine.policy_for(_ORG, _IDENTITY)
+    policy = engine.policies_for(_ORG, _IDENTITY)[0]
     assert policy is not None
     assert policy.policy_id == "hand-authored-standard"
 

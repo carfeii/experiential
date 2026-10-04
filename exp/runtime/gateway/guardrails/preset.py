@@ -93,18 +93,6 @@ _STAGE_CAPABILITY_TO_CHECK_ID: Final[dict[tuple[str, str], str]] = {
 }
 
 
-class AuthoredManualPolicy(ContractModel):
-    """Hand-authored identity policy with an explicit check list."""
-
-    policy_id: ArtifactId
-    organization_id: OrganizationId
-    identity_id: IdentityId
-    protected: bool = False
-    checks: tuple[GuardrailCheck, ...] = ()
-    max_request_bytes: int = Field(default=DEFAULT_MAX_REQUEST_BYTES, ge=1, le=64 * 1024 * 1024)
-    max_response_bytes: int = Field(default=DEFAULT_MAX_RESPONSE_BYTES, ge=1, le=64 * 1024 * 1024)
-
-
 class AuthoredStandardPolicy(ContractModel):
     """Identity policy that opts into the documented standard pack."""
 
@@ -229,7 +217,7 @@ def _expand_standard(item: Mapping[str, object], adapter_ids: frozenset[str]) ->
 def _manual_policy(item: Mapping[str, object], adapter_ids: frozenset[str]) -> GuardrailPolicy:
     """Parse a hand-authored policy and require every adapter to be registered."""
     try:
-        authored = AuthoredManualPolicy.model_validate(item)
+        authored = GuardrailPolicy.model_validate(item)
     except ValidationError as exc:
         raise ValueError("guardrail policy is malformed") from exc
     missing = sorted(
@@ -239,15 +227,7 @@ def _manual_policy(item: Mapping[str, object], adapter_ids: frozenset[str]) -> G
         raise ValueError(
             "guardrail checks reference unknown adapter_id values: " + ", ".join(missing)
         )
-    return GuardrailPolicy(
-        policy_id=authored.policy_id,
-        organization_id=authored.organization_id,
-        identity_id=authored.identity_id,
-        protected=authored.protected,
-        checks=authored.checks,
-        max_request_bytes=authored.max_request_bytes,
-        max_response_bytes=authored.max_response_bytes,
-    )
+    return authored
 
 
 def _bound_adapters(

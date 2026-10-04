@@ -15,13 +15,11 @@ from typing import Protocol
 
 from exp.common.core.artifacts import JsonObject
 from exp.runtime.gateway.contracts import GatewayFailure, GatewayFailureClass, GatewayRequest
-from exp.runtime.gateway.guardrails.contracts import GuardrailRejected
-from exp.runtime.gateway.guardrails.enforcement import GuardrailEngine
-from exp.runtime.gateway.guardrails.inspection import (
-    open_inspection,
-    require_output,
+from exp.runtime.gateway.guardrails.contracts import (
+    GuardrailCompletion,
+    GuardrailRejected,
+    GuardrailToolCall,
 )
-from exp.runtime.gateway.guardrails.streaming import GuardrailFragment, GuardrailOutput
 from exp.runtime.gateway.native_accounting import NativeBridgeError, internal_protocol_error
 from exp.runtime.gateway.native_execution import InflightRequest
 from exp.runtime.gateway.native_reasoning import rung_provider_request
@@ -37,14 +35,12 @@ class _Registry(Protocol):
 
 class _Plane(Protocol):
     _accounting: _Registry
-    _guardrails: GuardrailEngine | None
 
 
-def _search_output(request_id: str, calls: Sequence[WithheldSearchCall]) -> GuardrailOutput:
+def _search_output(calls: Sequence[WithheldSearchCall]) -> GuardrailCompletion:
     """Validate complete generated calls before a gateway-owned search action.
 
     Args:
-        request_id: Exact admitted request whose output session owns the calls.
         calls: Complete withheld search calls in provider order.
 
     Returns:
@@ -54,18 +50,13 @@ def _search_output(request_id: str, calls: Sequence[WithheldSearchCall]) -> Guar
         GuardrailRejected: A call exceeds the inspection contract's coverage.
     """
     try:
-        return GuardrailOutput(
-            request_id=request_id,
-            final=False,
-            fragments=tuple(
-                GuardrailFragment(
-                    kind="tool",
-                    channel=f"search:{call.call_id}",
-                    text=call.raw_arguments,
-                    name=call.name,
+        return GuardrailCompletion(
+            tool_calls=tuple(
+                GuardrailToolCall(
+                    call_id=call.call_id, name=call.name, arguments=call.raw_arguments
                 )
                 for call in calls
-            ),
+            )
         )
     except ValueError:
         raise GuardrailRejected(
@@ -113,30 +104,15 @@ class NativeToolSearchMixin:
         calls = parse_calls(data.get("calls"))
         rounds: list[JsonObject] = []
         try:
-            if entry.guardrail_inspection is not None:
-                require_output(
-                    entry.guardrail_inspection,
-                    _search_output(entry.authorization.request_id, calls),
-                    deadline_monotonic=entry.deadline_monotonic,
-                )
+            if entry.guardrails is not None:
+                entry.guardrails.inspect_output(_search_output(calls))
             outcome = perform_round(provider_request, entry.tool_search, calls)
             rounds = list(outcome.rounds)
-            session = open_inspection(
-                self._guardrails,
-                authorization=entry.authorization,
-                request=outcome.request,
-                deadline_monotonic=entry.deadline_monotonic,
+            inspected_request = (
+                outcome.request
+                if entry.guardrails is None
+                else entry.guardrails.inspect_input(outcome.request)
             )
-            if (session is None) != (entry.guardrail_inspection is None):
-                raise GuardrailRejected(
-                    GatewayFailure(
-                        failure_class=GatewayFailureClass.UNAVAILABLE,
-                        safe_message="Content inspection changed during this request. Retry later.",
-                    )
-                )
-            if session is not None and entry.guardrail_inspection is not None:
-                session.continue_request(entry.guardrail_inspection)
-            entry.guardrail_inspection = session
         except GuardrailRejected as exc:
             return json.dumps(
                 {"inspection_failure": exc.failure.model_dump(mode="json"), "rounds": rounds}
@@ -153,12 +129,12 @@ class NativeToolSearchMixin:
             deployment,
             profile,
             client,
-            provider_request=rung_provider_request(entry.route, deployment, outcome.request),
+            provider_request=rung_provider_request(entry.route, deployment, inspected_request),
             public_request=entry.public_request,
             authorization=entry.authorization,
             throttle_redial_budget=budget,
         )
-        entry.request = outcome.request
+        entry.request = inspected_request
         output_bounds = list(entry.reserved_output_tokens_by_depth)
         output_bounds[depth] = dispatch.reserved_output_tokens
         entry.reserved_output_tokens_by_depth = tuple(output_bounds)

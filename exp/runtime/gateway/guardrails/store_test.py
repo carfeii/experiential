@@ -23,9 +23,9 @@ def test_missing_pair_returns_none() -> None:
         (_policy(organization_id="organization-one", identity_id="identity-one"),)
     )
 
-    assert store.policy_for("organization-one", "identity-one") is not None
-    assert store.policy_for("organization-one", "identity-two") is None
-    assert store.policy_for("organization-two", "identity-one") is None
+    assert store.policies_for("organization-one", "identity-one") != ()
+    assert store.policies_for("organization-one", "identity-two") == ()
+    assert store.policies_for("organization-two", "identity-one") == ()
 
 
 def test_identical_identity_ids_do_not_share_policies_across_organizations() -> None:
@@ -34,14 +34,14 @@ def test_identical_identity_ids_do_not_share_policies_across_organizations() -> 
     second = _policy(organization_id="organization-two", identity_id="shared")
     store = MappingGuardrailStore((first, second))
 
-    assert store.policy_for("organization-one", "shared") is first
-    assert store.policy_for("organization-two", "shared") is second
-    assert store.policy_for("organization-one", "shared") is not second
+    assert store.policies_for("organization-one", "shared")[0] is first
+    assert store.policies_for("organization-two", "shared")[0] is second
+    assert store.policies_for("organization-one", "shared")[0] is not second
 
 
 def test_store_rejects_duplicate_organization_identity_pairs() -> None:
     """Two policies for the same organization and identity fail closed."""
-    with pytest.raises(ValueError, match="unique per organization"):
+    with pytest.raises(ValueError, match="must be unique"):
         MappingGuardrailStore(
             (
                 _policy(organization_id="organization-one", identity_id="identity-one"),

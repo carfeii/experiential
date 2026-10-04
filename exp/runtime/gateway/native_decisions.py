@@ -1,6 +1,6 @@
 """Authenticated, direct-route admission for native TypeSafe decisions.
 
-Decisions are not chat: they bypass prompt-based selection and chat guardrails,
+Decisions are not chat: they bypass prompt-based selection,
 carry no continuation or replay identity, and permit at most one dispatch per
 certified deployment. Only provider-reported usage settles a paid attempt.
 """
@@ -22,6 +22,7 @@ from exp.runtime.gateway.contracts import (
 )
 from exp.runtime.gateway.decisions_contracts import DecisionRequest, decode_decision_request
 from exp.runtime.gateway.guardrails.client import assert_not_internal_classification
+from exp.runtime.gateway.guardrails.enforcement import GuardrailEngine
 from exp.runtime.gateway.model_chain_authority import authorize_serving_model_chains
 from exp.runtime.gateway.native_accounting import (
     NativeAttemptAccounting,
@@ -51,6 +52,7 @@ class _DecisionsPlane(Protocol):
     _accounting: NativeAttemptAccounting
     _write_ledger: SyncWriteLedger
     _request_timeout_seconds: float
+    _guardrails: GuardrailEngine | None
 
     def _escalate_accepted(self, authorization: AuthorizationSnapshot, reason: str) -> str:
         """Finish an accepted request that cannot use the native data plane."""
@@ -138,6 +140,23 @@ class NativeDecisionsMixin:
                 client_ip=optional_text(data.get("client_ip")),
             )
             authorization = authorize_serving_model_chains(self._components, authorization)
+        except Exception as exc:  # noqa: BLE001 - sanitize the authority boundary.
+            raise authority_error(exc) from exc
+        if self._guardrails is not None and self._guardrails.policies_for(
+            authorization.organization_id, authorization.identity_id
+        ):
+            raise NativeBridgeError(
+                OpenAIProtocolError(
+                    status_code=400,
+                    code="unsupported_capability",
+                    message=(
+                        "Guardrail policies do not support native decisions. "
+                        "Use a supported text endpoint."
+                    ),
+                    param="model",
+                )
+            )
+        try:
             self._write_ledger.accept_request(authorization=authorization)
         except Exception as exc:  # noqa: BLE001 - sanitize the authority boundary.
             raise authority_error(exc) from exc

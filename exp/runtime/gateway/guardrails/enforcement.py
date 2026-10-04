@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping
 from hashlib import sha256
 
 from exp.common.core.artifacts import canonical_json_bytes
@@ -11,11 +11,10 @@ from exp.runtime.gateway.contracts import (
     AuthorizationSnapshot,
     GatewayFailure,
     GatewayFailureClass,
-    GatewayMessage,
     GatewayRequest,
 )
 from exp.runtime.gateway.guardrails.bounded import BoundedInspect, ClassifierTimeoutError
-from exp.runtime.gateway.guardrails.client import InternalClassifierClient, classification_scope
+from exp.runtime.gateway.guardrails.client import InternalClassifierClient
 from exp.runtime.gateway.guardrails.contracts import (
     ClassifierVerdict,
     GuardrailAction,
@@ -23,17 +22,14 @@ from exp.runtime.gateway.guardrails.contracts import (
     GuardrailCompletion,
     GuardrailPolicy,
     GuardrailRejected,
-    MandatoryGuardrailPolicy,
     OutputGuardrailMode,
     guardrail_failure,
     request_content_bytes,
 )
-from exp.runtime.gateway.guardrails.inspection import GuardrailInspection
+from exp.runtime.gateway.guardrails.redaction import restored_provider_authority
+from exp.runtime.gateway.guardrails.session import GuardrailSession
 from exp.runtime.gateway.guardrails.store import GuardrailPolicyStore
 from exp.runtime.gateway.guardrails.streaming import (
-    ClassifierOutputSession,
-    GuardrailOutput,
-    IncrementalClassifier,
     StreamingRedactor,
     StreamSegment,
     release_segment,
@@ -42,94 +38,8 @@ from exp.runtime.gateway.guardrails.streaming import (
 _logger = logging.getLogger(__name__)
 
 
-def restored_provider_authority(
-    original: Sequence[GatewayMessage],
-    replacement: Sequence[GatewayMessage],
-) -> tuple[GatewayMessage, ...] | None:
-    """Validate visible edits and restore hidden provider replay authority.
-
-    Hosted classifiers receive only the normal serialized message projection,
-    because replay-only reasoning, raw arguments, provider identity, status,
-    and phase are excluded from that contract. A valid replacement must keep
-    the classifier-visible authenticated prefix exact. The gateway then uses
-    the original prefix objects, reattaching every hidden field without asking
-    the classifier to receive or echo it.
-    """
-
-    def has_authority(message: GatewayMessage) -> bool:
-        """Identify fields that must replay byte-exact on a provider continuation."""
-        return bool(
-            message.provider_reasoning
-            or message.provider_item_id is not None
-            or message.provider_output_index is not None
-            or message.provider_status is not None
-            or message.provider_phase is not None
-            or message.provider_tool_name is not None
-            or message.provider_tool_namespace is not None
-            or message.provider_tool_caller is not None
-            or message.tool_is_error
-            or any(
-                call.raw_arguments is not None
-                or call.provider_item_id is not None
-                or call.provider_output_index is not None
-                or call.provider_status is not None
-                or call.provider_namespace is not None
-                or call.provider_caller is not None
-                for call in message.tool_calls
-            )
-        )
-
-    original_carrier_indexes = tuple(
-        index for index, message in enumerate(original) if has_authority(message)
-    )
-    if not original_carrier_indexes:
-        return (
-            None if any(has_authority(message) for message in replacement) else tuple(replacement)
-        )
-    original_fireworks_carriers = tuple(
-        index
-        for index, message in enumerate(original)
-        if any(
-            block.kind in {"reasoning_content", "sealed_reasoning_content"}
-            for block in message.provider_reasoning
-        )
-    )
-    replacement_fireworks_carriers = tuple(
-        index
-        for index, message in enumerate(replacement)
-        if any(
-            block.kind in {"reasoning_content", "sealed_reasoning_content"}
-            for block in message.provider_reasoning
-        )
-    )
-    if original_fireworks_carriers:
-        if not replacement_fireworks_carriers:
-            return (
-                tuple(replacement)
-                if all(message.role in {"system", "developer", "user"} for message in replacement)
-                else None
-            )
-        if replacement_fireworks_carriers != original_fireworks_carriers:
-            return None
-        for index in original_fireworks_carriers:
-            if original[index] != replacement[index]:
-                return None
-    bound = original_carrier_indexes[-1]
-    if len(replacement) <= bound:
-        return None
-    original_visible = tuple(message.model_dump(mode="json") for message in original[: bound + 1])
-    replacement_visible = tuple(
-        message.model_dump(mode="json") for message in replacement[: bound + 1]
-    )
-    if replacement_visible != original_visible:
-        return None
-    if any(has_authority(message) for message in replacement[bound + 1 :]):
-        return None
-    return (*original[: bound + 1], *replacement[bound + 1 :])
-
-
 class GuardrailEngine:
-    """Look up identity policies and run classifier chains once per stage.
+    """Resolve scoped policies and execute their checks through request-owned sessions.
 
     The engine never logs request text, completions, detector payloads, or
     replacements. Decision metadata is limited to identity, policy, check,
@@ -144,12 +54,11 @@ class GuardrailEngine:
         monotonic: Callable[[], float],
         inspects: BoundedInspect | None = None,
         deterministic_specifications: Mapping[str, str] | None = None,
-        mandatory_policy: MandatoryGuardrailPolicy | None = None,
     ) -> None:
         """Bind lookup, the internal client, and the deadline clock.
 
         Args:
-            store: Identity-keyed policy lookup.
+            store: Applicable platform and identity policy lookup.
             client: Injected adapter seam that cannot use the public route.
             monotonic: Process-local clock in seconds.
             inspects: Optional async inflight limiter. ``None`` uses the
@@ -159,20 +68,11 @@ class GuardrailEngine:
                 that runs the Rust data plane compiles these once and lets
                 matching chains run in plane. Omitting them keeps every
                 chain on this engine.
-            mandatory_policy: Operator-owned checks applied independently of
-                identity assignments, through this engine's existing client,
-                bounded executor, and decision recorder.
         """
         self.deterministic_specifications: Mapping[str, str] = dict(
             deterministic_specifications or {}
         )
         self._store = store
-        self._mandatory_policy = mandatory_policy
-        self.inspection_revision = (
-            None
-            if mandatory_policy is None
-            else sha256(canonical_json_bytes(mandatory_policy)).hexdigest()
-        )
         self._client = client
         self._monotonic = monotonic
         self._inspects = inspects or BoundedInspect()
@@ -180,101 +80,36 @@ class GuardrailEngine:
         self.output_invocations = 0
         self.classifier_calls = 0
 
-    @property
-    def mandatory_policy(self) -> MandatoryGuardrailPolicy | None:
-        """Return the immutable operator policy captured when this engine was composed."""
-        return self._mandatory_policy
+    def policies_for(self, organization_id: str, identity_id: str) -> tuple[GuardrailPolicy, ...]:
+        """Resolve all applicable scopes through the single policy store contract."""
+        return self._store.policies_for(organization_id, identity_id)
 
-    async def open_inspection(
-        self,
-        *,
-        authorization: AuthorizationSnapshot,
-        request: GatewayRequest,
-        deadline_monotonic: float,
-    ) -> GuardrailInspection | None:
-        """Enforce mandatory input and bind fresh output capabilities to one request.
-
-        Ordinary adapters retain complete-output enforcement. Adapters that
-        implement the incremental capability share the same per-check deadlines,
-        cancellation isolation, and decision metrics as complete-output checks.
-
-        Args:
-            authorization: Authenticated identity used for mandatory policy binding.
-            request: Full normalized provider-bound input.
-            deadline_monotonic: Absolute deadline shared with request execution.
-
-        Returns:
-            Request-owned output capabilities, or None when no output checks exist.
-
-        Raises:
-            GuardrailRejected: Input was blocked or a mandatory capability failed.
-        """
-        if self.mandatory_policy is None:
+    def open_request(
+        self, authorization: AuthorizationSnapshot, *, deadline_monotonic: float
+    ) -> GuardrailSession | None:
+        """Freeze all applicable policies into one request-owned execution session."""
+        policies = self.policies_for(authorization.organization_id, authorization.identity_id)
+        if not policies:
             return None
-        policy = self.mandatory_policy.bind(
-            authorization.organization_id, authorization.identity_id
+        return GuardrailSession(
+            engine=self, policies=policies, deadline_monotonic=deadline_monotonic
         )
-        await self.enforce_input(
-            policy=policy, request=request, deadline_monotonic=deadline_monotonic
+
+    def revision_for(self, authorization: AuthorizationSnapshot) -> str | None:
+        """Bind replay to the full applicable policy, adapter, and execution configuration."""
+        policies = self.policies_for(authorization.organization_id, authorization.identity_id)
+        return (
+            None
+            if not policies
+            else sha256(
+                canonical_json_bytes(
+                    {
+                        "policies": [p.model_dump(mode="json") for p in policies],
+                        "detectors": dict(self.deterministic_specifications),
+                    }
+                )
+            ).hexdigest()
         )
-        if not policy.output_checks:
-            return None
-        sessions: list[tuple[GuardrailCheck, ClassifierOutputSession | None]] = []
-        client = self._client
-        for check in policy.output_checks:
-            session = None
-            if isinstance(client, IncrementalClassifier):
-                budget = min(check.timeout_ms / 1000, deadline_monotonic - self._monotonic())
-                try:
-                    session = await self._inspects.run(
-                        lambda bound=check: client.open_output_session(
-                            request=request, check=bound
-                        ),
-                        budget,
-                        adapter_id=check.adapter_id,
-                    )
-                except Exception:  # noqa: BLE001 - opening an adapter is also fail-closed.
-                    self._uncertain(policy, check, GuardrailAction.ERROR)
-            sessions.append((check, session))
-        return GuardrailInspection(engine=self, policy=policy, sessions=tuple(sessions))
-
-    async def inspect_output_segment(
-        self,
-        *,
-        policy: GuardrailPolicy,
-        check: GuardrailCheck,
-        session: ClassifierOutputSession,
-        output: GuardrailOutput,
-        deadline_monotonic: float,
-    ) -> None:
-        """Run an incremental adapter through the shared executor and decision recorder.
-
-        Args:
-            policy: Frozen mandatory policy bound to the admitted identity.
-            check: Output check whose action governs the verdict.
-            session: Request-owned adapter state.
-            output: Withheld additions to the request's generated content.
-            deadline_monotonic: Original request deadline.
-
-        Raises:
-            GuardrailRejected: The check blocked or failed closed.
-        """
-        self.output_invocations += 1
-
-        async def inspect() -> ClassifierVerdict:
-            """Preserve the public-route recursion guard on the isolated worker."""
-            with classification_scope():
-                return await session.inspect_output(output)
-
-        verdict = await self._run_check(
-            policy=policy, check=check, inspect=inspect, deadline_monotonic=deadline_monotonic
-        )
-        if verdict is not None:
-            self._apply_output(policy, check, GuardrailCompletion(), verdict)
-
-    def policy_for(self, organization_id: str, identity_id: str) -> GuardrailPolicy | None:
-        """Return the assigned policy, or ``None`` for unguarded traffic."""
-        return self._store.policy_for(organization_id, identity_id)
 
     async def enforce_input(
         self,
@@ -533,18 +368,12 @@ class GuardrailEngine:
         """Apply fail-closed or skip-and-continue for an uncertain check."""
         self._record(policy, check, action, 0.0)
         if policy.protected:
-            if (
-                self.mandatory_policy is not None
-                and policy.policy_id == self.mandatory_policy.policy_id
-            ):
-                raise GuardrailRejected(
-                    GatewayFailure(
-                        failure_class=GatewayFailureClass.UNAVAILABLE,
-                        safe_message="Content inspection is unavailable. Retry later.",
-                    )
-                )
             raise GuardrailRejected(
-                guardrail_failure(action=GuardrailAction.ERROR, check_id=check.check_id)
+                GatewayFailure(
+                    failure_class=GatewayFailureClass.UNAVAILABLE,
+                    safe_message="Content inspection is unavailable. Retry later.",
+                    safe_details={"action": "error", "check_id": check.check_id},
+                )
             )
         return None
 
@@ -595,7 +424,7 @@ class GuardrailEngine:
                 raise GuardrailRejected(
                     guardrail_failure(action=GuardrailAction.ERROR, check_id=check.check_id)
                 )
-            return completion.model_copy(update={"text": verdict.replacement_text})
+            return completion.model_copy(update={"text": verdict.replacement_text, "context": ()})
         raise GuardrailRejected(guardrail_failure(action=check.action, check_id=check.check_id))
 
     def _record(

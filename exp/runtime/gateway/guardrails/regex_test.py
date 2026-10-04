@@ -63,7 +63,7 @@ def test_builtin_redaction_preserves_surrounding_text_on_both_stages(
 ) -> None:
     """Real input/output chains preserve Unicode and only replace detected spans."""
     engine = engine_from_document(_document({"builtin_patterns": ["email", "credit_card"]}))
-    policy = engine.policy_for("org", "identity")
+    policy = engine.policies_for("org", "identity")[0]
     assert policy is not None
     request = GatewayRequest(
         surface=GatewayApiSurface.CHAT_COMPLETIONS,
@@ -80,7 +80,7 @@ def test_builtin_redaction_preserves_surrounding_text_on_both_stages(
         )
     )
     assert output.text == expected
-    assert engine.policy_for("org", "other") is None
+    assert engine.policies_for("org", "other") == ()
 
 
 @pytest.mark.parametrize(
@@ -142,7 +142,7 @@ def test_adversarial_backtracking_pattern_completes_with_linear_engine() -> None
 def test_block_action_refuses_match_and_allows_clean_input() -> None:
     """A custom content rule can block instead of modifying the request."""
     engine = engine_from_document(_document({"patterns": [r"internal-[0-9]+"]}, action="block"))
-    policy = engine.policy_for("org", "identity")
+    policy = engine.policies_for("org", "identity")[0]
     assert policy is not None
     for text in ("internal-123", "public documentation"):
         request = GatewayRequest(
@@ -166,7 +166,7 @@ def test_block_action_refuses_match_and_allows_clean_input() -> None:
 def test_tool_completion_is_blocked_instead_of_rewritten() -> None:
     """Redaction never passes sensitive tool arguments to the caller."""
     engine = engine_from_document(_document({"builtin_patterns": ["email"]}))
-    policy = engine.policy_for("org", "identity")
+    policy = engine.policies_for("org", "identity")[0]
     assert policy is not None
     completion = GuardrailCompletion(
         tool_calls=(
@@ -201,7 +201,7 @@ def test_match_explosion_is_bounded() -> None:
 def test_input_tool_arguments_never_escape_a_redaction_rule(protected: bool) -> None:
     """Known sensitive tool content is refused even when uncertainty is fail-open."""
     engine = engine_from_document(_document({"builtin_patterns": ["email"]}))
-    policy = engine.policy_for("org", "identity")
+    policy = engine.policies_for("org", "identity")[0]
     assert policy is not None
     policy = policy.model_copy(update={"protected": protected})
     request = GatewayRequest(

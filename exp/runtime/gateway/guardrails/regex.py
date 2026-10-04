@@ -341,6 +341,9 @@ class RegexClassifier:
     ) -> ClassifierVerdict:
         """Redact completion text; the engine blocks modifications of tool completions."""
         flagged, text = self._redact(completion.text)
+        for context in completion.context:
+            found, _ = self._redact(context)
+            flagged |= found
         for call in completion.tool_calls:
             found, _ = self._redact(call.arguments)
             flagged |= found

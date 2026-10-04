@@ -23,7 +23,7 @@ from exp.runtime.gateway.management import GatewayManagement
 from exp.runtime.gateway.native_bridge import NativeControlPlane
 from exp.runtime.gateway.native_server import serve_native_gateway
 from exp.runtime.gateway.tests.launch_test import _unused_port
-from exp.runtime.gateway.tests.mandatory_guardrails_test import _Guard, _Session
+from exp.runtime.gateway.tests.mandatory_guardrails_test import _Guard
 from exp.runtime.gateway.tests.native_tool_search_test import (
     _configure,
     _search_call_turn,
@@ -49,18 +49,6 @@ class _RetrievedGuard(_Guard):
             "withhold-marker" in message.model_dump_json() for message in request.messages
         )
         return await super().inspect_input(request=request, check=check)
-
-
-class _ChangingGuard(_Guard):
-    """Expose a different buffering requirement after retrieval expands the context."""
-
-    async def open_output_session(
-        self, *, request: GatewayRequest, check: GuardrailCheck
-    ) -> _Session | None:
-        """Switch the required output capability only after a tool result is appended."""
-        if any(message.role == "tool" for message in request.messages):
-            return None if self.incremental else _Session()
-        return await super().open_output_session(request=request, check=check)
 
 
 @contextmanager
@@ -100,7 +88,6 @@ def _serving(control: NativeControlPlane) -> Iterator[str]:
 
 @pytest.mark.parametrize("surface", ["chat", "responses", "messages"])
 @pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("incremental", [False, True])
 @pytest.mark.parametrize(
     "path", ["refusal", "search", "empty-search", "search-input", "empty-search-input"]
 )
@@ -109,7 +96,6 @@ def test_precommit_and_synthesized_output_is_inspected_before_settlement(
     surface: str,
     stream: bool,
     path: str,
-    incremental: bool,
 ) -> None:
     """A real refusal flush or search prelude cannot release the synthetic marker."""
     provider_requests: list[JsonObject] = []
@@ -187,11 +173,7 @@ def test_precommit_and_synthesized_output_is_inspected_before_settlement(
         refusal_failover=True,
     )
     components = load_gateway_components(tmp_path, environment={"TEST_PROVIDER_KEY": "synthetic"})
-    policy = (
-        _RetrievedGuard(incremental=incremental)
-        if path.endswith("-input")
-        else _Guard(incremental=incremental)
-    )
+    policy = _RetrievedGuard() if path.endswith("-input") else _Guard()
     search = StaticWebSearchBackend(
         (
             GatewayWebSearchResult(
@@ -230,12 +212,7 @@ def test_precommit_and_synthesized_output_is_inspected_before_settlement(
                 "withhold-marker" in request.model_dump_json() for request in policy.requests
             )
         else:
-            if incremental:
-                assert any("withhold-marker" in session.text for session in policy.sessions)
-            else:
-                assert any(
-                    "withhold-marker" in item.model_dump_json() for item in policy.completions
-                )
+            assert any("withhold-marker" in item.model_dump_json() for item in policy.completions)
         with sqlite3.connect(components.ledger.database_path) as connection:
             assert connection.execute(
                 "select state, failure_class from gateway_attempts"
@@ -250,18 +227,17 @@ def test_precommit_and_synthesized_output_is_inspected_before_settlement(
 
 
 @pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("incremental", [False, True])
 @pytest.mark.parametrize(
     ("phase", "surface"),
     [("render", "responses")]
     + [
         (phase, surface)
-        for phase in ("query", "retrieved", "capability-change")
+        for phase in ("query", "retrieved")
         for surface in ("chat", "responses", "messages")
     ],
 )
 def test_tool_search_is_inspected_before_execution_redial_and_rendering(
-    tmp_path: Path, stream: bool, phase: str, surface: str, incremental: bool
+    tmp_path: Path, stream: bool, phase: str, surface: str
 ) -> None:
     """Reject unsafe generated queries before search and retrieved results before redial."""
     provider_requests: list[JsonObject] = []
@@ -295,10 +271,8 @@ def test_tool_search_is_inspected_before_execution_redial_and_rendering(
     worker.start()
     key = _configure(tmp_path, f"http://127.0.0.1:{provider.server_port}/v1")
     components = load_gateway_components(tmp_path, environment={"TEST_PROVIDER_KEY": "synthetic"})
-    guard_type = {"retrieved": _RetrievedGuard, "capability-change": _ChangingGuard}.get(
-        phase, _Guard
-    )
-    policy = guard_type(incremental=incremental)
+    guard_type = {"retrieved": _RetrievedGuard}.get(phase, _Guard)
+    policy = guard_type()
     control = NativeControlPlane(components, guardrails=policy)
     description = "Current weather" + (
         " withhold-marker" if phase in {"retrieved", "render"} else ""
@@ -350,13 +324,9 @@ def test_tool_search_is_inspected_before_execution_redial_and_rendering(
                 json=body,
                 timeout=10,
             )
-        assert response.status_code == (503 if phase == "capability-change" else 400), response.text
+        assert response.status_code == 400, response.text
         assert "withhold-marker" not in response.text
-        assert (
-            "Content inspection changed"
-            if phase == "capability-change"
-            else "blocked by a gateway guardrail"
-        ) in response.text
+        assert "blocked by a gateway guardrail" in response.text
         assert search.call_count == (0 if phase == "query" else 1)
         assert len(provider_requests) == (2 if phase == "render" else 1)
         if phase != "render":
@@ -370,10 +340,6 @@ def test_tool_search_is_inspected_before_execution_redial_and_rendering(
                 "withhold-marker" in request.messages[-1].model_dump_json()
                 for request in policy.requests
             )
-        elif phase == "capability-change":
-            assert len(policy.requests) >= 2
-        elif incremental:
-            assert any("withhold-marker" in session.text for session in policy.sessions)
         else:
             assert any("withhold-marker" in item.model_dump_json() for item in policy.completions)
         with sqlite3.connect(components.ledger.database_path) as connection:
@@ -383,7 +349,7 @@ def test_tool_search_is_inspected_before_execution_redial_and_rendering(
             ).fetchall()
         assert attempts[-1][:2] == (
             "failed",
-            "unavailable" if phase == "capability-change" else "guardrail",
+            "guardrail",
         )
         assert attempts[0][2:] == (50, 8)
         assert len(attempts) == len(provider_requests)

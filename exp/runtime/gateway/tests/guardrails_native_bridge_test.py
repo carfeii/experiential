@@ -351,4 +351,4 @@ def test_unknown_request_segment_fails_closed(tmp_path: Path) -> None:
     )
     assert decision["action"] == "error"
     assert "release" not in decision
-    assert decision["failure"]["failure_class"] == "guardrail"
+    assert decision["failure"]["failure_class"] == "unavailable"

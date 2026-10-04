@@ -40,9 +40,9 @@ use crate::settlement::AttemptGuard;
 use crate::throttle_backoff::{track_retry_after, with_largest_retry_after};
 use crate::tool_search::{ToolSearchRound, WithheldSearchCall};
 
-mod inspection;
-use inspection::inspect_outward;
-pub use inspection::InspectionContext;
+mod output_guardrails;
+use output_guardrails::inspect_outward;
+pub use output_guardrails::OutputGuardrailContext;
 
 /// Byte bound for withheld refusal deltas, matching the python executor's
 /// `_MAX_WITHHELD_REFUSAL_BYTES`.
@@ -385,7 +385,7 @@ pub async fn acquire_attempt(ctx: &WaterfallContext<'_>, guard: &mut AttemptGuar
                 // semantic chunk, so an aggregator's upstream label (if any)
                 // is known here; settle it with whatever outcome follows.
                 guard.record_upstream_provider(committed.relay.upstream_provider());
-                if let Err(failure) = inspect_outward(ctx, &tool_search_rounds, &[], false).await {
+                if let Err(failure) = inspect_outward(ctx, &tool_search_rounds, &[]).await {
                     committed.relay.close_transport();
                     if !guard
                         .settle(
@@ -570,7 +570,7 @@ pub async fn acquire_attempt(ctx: &WaterfallContext<'_>, guard: &mut AttemptGuar
                         || failure.failure_class == FailureClass::EmptyCompletion)
                 {
                     if let Err(inspection_failure) =
-                        inspect_outward(ctx, &tool_search_rounds, &exhaustion_flush, true).await
+                        inspect_outward(ctx, &tool_search_rounds, &exhaustion_flush).await
                     {
                         if !guard
                             .settle(

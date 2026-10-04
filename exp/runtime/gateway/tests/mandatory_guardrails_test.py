@@ -29,11 +29,9 @@ from exp.runtime.gateway.guardrails.contracts import (
     GuardrailCheckStage,
     GuardrailCompletion,
     GuardrailPolicy,
-    MandatoryGuardrailPolicy,
 )
 from exp.runtime.gateway.guardrails.enforcement import GuardrailEngine
 from exp.runtime.gateway.guardrails.store import MappingGuardrailStore
-from exp.runtime.gateway.guardrails.streaming import GuardrailOutput
 from exp.runtime.gateway.lifecycle import load_gateway_components
 from exp.runtime.gateway.lifecycle_test import _configured_gateway
 from exp.runtime.gateway.native_bridge import NativeBridgeError, NativeControlPlane
@@ -55,19 +53,6 @@ def _tool_chunk(arguments: str, *, start: bool = False) -> bytes:
     return _sse_frame({"choices": [{"index": 0, "delta": {"tool_calls": [call]}}]})
 
 
-class _Session:
-    """Accumulate split synthetic markers in one request-owned classifier session."""
-
-    def __init__(self) -> None:
-        """Start with no content inherited from another request."""
-        self.text = ""
-
-    async def inspect_output(self, output: GuardrailOutput) -> ClassifierVerdict:
-        """Flag a marker even when provider transport splits it into deltas."""
-        self.text += "".join(fragment.text for fragment in output.fragments)
-        return ClassifierVerdict(flagged="withhold-marker" in self.text)
-
-
 class _Guard(GuardrailEngine):
     """Compose a synthetic adapter through the normal engine and mandatory policy layer."""
 
@@ -77,40 +62,38 @@ class _Guard(GuardrailEngine):
         block_input: bool = False,
         policies: tuple[GuardrailPolicy, ...] = (),
         adapters: Mapping[str, InspectingClassifier] | None = None,
-        incremental: bool = True,
         inspects: BoundedInspect | None = None,
         timeout_ms: int = 5000,
         max_response_bytes: int = 1_048_576,
     ) -> None:
         """Use the same registry and executor for operator and customer checks."""
         self.block_input = block_input
-        self.incremental = incremental
         self.requests: list[GatewayRequest] = []
-        self.sessions: list[_Session] = []
         self.completions: list[GuardrailCompletion] = []
+        policy = GuardrailPolicy(
+            policy_id="platform-test",
+            revision="synthetic-policy-v1",
+            protected=True,
+            max_response_bytes=max_response_bytes,
+            checks=tuple(
+                GuardrailCheck(
+                    check_id=f"platform-{stage.value}",
+                    capability=GuardrailCapabilityKind.CONTENT_SAFETY,
+                    stage=stage,
+                    action=GuardrailAction.BLOCK,
+                    timeout_ms=timeout_ms,
+                    adapter_id="platform",
+                )
+                for stage in (GuardrailCheckStage.INPUT, GuardrailCheckStage.OUTPUT)
+            ),
+        )
         super().__init__(
-            store=MappingGuardrailStore(policies),
+            store=MappingGuardrailStore((policy, *policies)),
             client=DirectClassifierClient(
-                ClassifierRegistry({**(adapters or {}), "mandatory": self})
+                ClassifierRegistry({**(adapters or {}), "platform": self})
             ),
             monotonic=time.monotonic,
             inspects=inspects,
-            mandatory_policy=MandatoryGuardrailPolicy(
-                policy_id="mandatory-test",
-                revision="synthetic-policy-v1",
-                max_response_bytes=max_response_bytes,
-                checks=tuple(
-                    GuardrailCheck(
-                        check_id=f"mandatory-{stage.value}",
-                        capability=GuardrailCapabilityKind.CONTENT_SAFETY,
-                        stage=stage,
-                        action=GuardrailAction.BLOCK,
-                        timeout_ms=timeout_ms,
-                        adapter_id="mandatory",
-                    )
-                    for stage in (GuardrailCheckStage.INPUT, GuardrailCheckStage.OUTPUT)
-                ),
-            ),
         )
 
     async def inspect_input(
@@ -127,18 +110,9 @@ class _Guard(GuardrailEngine):
         self.completions.append(completion)
         return ClassifierVerdict(
             flagged="withhold-marker" in completion.text
+            or any("withhold-marker" in item for item in completion.context)
             or any("withhold-marker" in call.arguments for call in completion.tool_calls)
         )
-
-    async def open_output_session(
-        self, *, request: GatewayRequest, check: GuardrailCheck
-    ) -> _Session | None:
-        """Bind fresh classifier state to this request's complete input context."""
-        if not self.incremental:
-            return None
-        session = _Session()
-        self.sessions.append(session)
-        return session
 
 
 def test_mandatory_input_refuses_before_durable_acceptance(tmp_path: Path) -> None:
@@ -150,7 +124,6 @@ def test_mandatory_input_refuses_before_durable_acceptance(tmp_path: Path) -> No
     with pytest.raises(NativeBridgeError):
         _admit(control, raw_key, _chat_body())
     assert len(guard.requests) == 1
-    assert not guard.sessions
     with sqlite3.connect(components.ledger.database_path) as connection:
         assert connection.execute("select count(*) from gateway_requests").fetchone()[0] == 0
         assert connection.execute("select count(*) from gateway_attempts").fetchone()[0] == 0
@@ -159,15 +132,13 @@ def test_mandatory_input_refuses_before_durable_acceptance(tmp_path: Path) -> No
 @pytest.mark.parametrize("surface", ["chat", "responses", "messages"])
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("tool_call", [False, True, "large"])
-@pytest.mark.parametrize("incremental", [False, True])
-def test_real_native_guardrail_inspection_holds_each_segment(
+def test_real_native_output_policy_withholds_complete_response(
     tmp_path: Path,
     surface: str,
     streaming: bool,
     tool_call: bool | Literal["large"],
-    incremental: bool,
 ) -> None:
-    """A safe prefix streams before generation ends; the violating segment never escapes."""
+    """Blocking output checks withhold the whole completion across all protocols."""
     continue_output = threading.Event()
     upstream_finished = threading.Event()
     prefix = "This is an allowed synthetic explanation. " * 9
@@ -185,8 +156,6 @@ def test_real_native_guardrail_inspection_holds_each_segment(
             try:
                 self.wfile.write(_content_chunk(prefix))
                 self.wfile.flush()
-                if streaming and incremental:
-                    continue_output.wait(5)
                 arguments = '{"q":"' + ("x" * 600_000 if tool_call == "large" else "") + "withhold-"
                 frames = (
                     (_tool_chunk(arguments, start=True), _tool_chunk('marker"}'))
@@ -219,7 +188,7 @@ def test_real_native_guardrail_inspection_holds_each_segment(
         base_url=f"http://127.0.0.1:{provider.server_port}/v1",
         capabilities=ModelCapabilities(maximum_output_tokens=128_000, supports_tools=True),
     )
-    guard = _Guard(incremental=incremental)
+    guard = _Guard()
     components = load_gateway_components(tmp_path, environment={"TEST_PROVIDER_KEY": "synthetic"})
     control = NativeControlPlane(
         components,
@@ -283,18 +252,12 @@ def test_real_native_guardrail_inspection_holds_each_segment(
                     assert not upstream_finished.is_set()
                     continue_output.set()
             result = "".join(chunks)
-            assert response.status_code == (200 if streaming and incremental else 400)
+            assert response.status_code == 400
         assert "withhold-" not in result
         assert "blocked by a gateway guardrail" in result
         assert len(guard.requests) == 1
-        if incremental:
-            assert "withhold-marker" in guard.sessions[0].text
-        else:
-            assert prefix not in result
-            assert not guard.sessions
-            assert any("withhold-marker" in item.model_dump_json() for item in guard.completions)
-        if streaming and incremental:
-            assert continue_output.is_set()
+        assert prefix not in result
+        assert any("withhold-marker" in item.model_dump_json() for item in guard.completions)
         with sqlite3.connect(components.ledger.database_path) as connection:
             rows = connection.execute(
                 "select state, failure_class from gateway_attempts"

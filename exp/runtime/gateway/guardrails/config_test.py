@@ -85,7 +85,7 @@ def test_unrelated_top_level_fields_are_accepted_by_the_loader() -> None:
     document = _standard_document()
     document["retention"] = "operator-owned"
     engine = engine_from_document(document)
-    policy = engine.policy_for("organization-one", "identity-one")
+    policy = engine.policies_for("organization-one", "identity-one")[0]
     assert policy is not None
     assert policy.policy_id == "standard-member"
 
@@ -122,15 +122,15 @@ def test_document_registers_keyword_adapters_and_identity_policies() -> None:
         }
     )
 
-    assert engine.policy_for("organization-one", "identity-one") is not None
-    assert engine.policy_for("organization-one", "identity-two") is None
-    assert engine.policy_for("organization-two", "identity-one") is None
+    assert engine.policies_for("organization-one", "identity-one") != ()
+    assert engine.policies_for("organization-one", "identity-two") == ()
+    assert engine.policies_for("organization-two", "identity-one") == ()
 
 
 def test_standard_preset_document_binds_hosted_adapters_in_order() -> None:
     """The standard pack expands only for the opted-in identity."""
     engine = engine_from_document(_standard_document())
-    policy = engine.policy_for("organization-one", "identity-one")
+    policy = engine.policies_for("organization-one", "identity-one")[0]
 
     assert policy is not None
     assert policy.protected is True
@@ -138,15 +138,15 @@ def test_standard_preset_document_binds_hosted_adapters_in_order() -> None:
         step.check_id for step in STANDARD_PRESET_STEPS
     ]
     assert all(check.timeout_ms == STANDARD_DEFAULT_TIMEOUT_MS for check in policy.checks)
-    assert engine.policy_for("organization-one", "identity-two") is None
+    assert engine.policies_for("organization-one", "identity-two") == ()
 
 
 def test_standard_preset_never_enables_a_global_policy() -> None:
     """Other organizations and identities stay on the unguarded hot path."""
     engine = engine_from_document(_standard_document())
 
-    assert engine.policy_for("organization-two", "identity-one") is None
-    assert engine.policy_for("organization-one", "identity-two") is None
+    assert engine.policies_for("organization-two", "identity-one") == ()
+    assert engine.policies_for("organization-one", "identity-two") == ()
 
 
 def test_unknown_adapter_kind_is_rejected() -> None:
@@ -216,7 +216,7 @@ def test_standard_preset_file_round_trip(tmp_path: Path) -> None:
 
     engine = load_guardrail_engine(tmp_path)
     assert engine is not None
-    policy = engine.policy_for("organization-one", "identity-one")
+    policy = engine.policies_for("organization-one", "identity-one")[0]
     assert policy is not None
     assert len(policy.checks) == 7
 
@@ -232,7 +232,7 @@ def test_protected_standard_preset_blocks_flagged_prompt_injection() -> None:
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     engine = engine_from_document(_standard_document(), http_client=client)
-    policy = engine.policy_for("organization-one", "identity-one")
+    policy = engine.policies_for("organization-one", "identity-one")[0]
     assert policy is not None
     request = GatewayRequest(
         surface=GatewayApiSurface.CHAT_COMPLETIONS,
@@ -269,7 +269,7 @@ def test_output_secret_modify_blocks_tool_calls_instead_of_rewriting() -> None:
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     engine = engine_from_document(_standard_document(), http_client=client)
-    policy = engine.policy_for("organization-one", "identity-one")
+    policy = engine.policies_for("organization-one", "identity-one")[0]
     assert policy is not None
     completion = GuardrailCompletion(
         text="looked up a value",
@@ -292,7 +292,7 @@ def test_output_secret_modify_blocks_tool_calls_instead_of_rewriting() -> None:
 def test_standard_pii_checks_use_modify_on_input_and_output() -> None:
     """Hosted PII redaction is modify, not block, on both stages."""
     engine = engine_from_document(_standard_document())
-    policy = engine.policy_for("organization-one", "identity-one")
+    policy = engine.policies_for("organization-one", "identity-one")[0]
     assert policy is not None
     pii_checks = [
         check for check in policy.checks if check.capability is GuardrailCapabilityKind.PII

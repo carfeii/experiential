@@ -1,4 +1,4 @@
-"""Immutable identity-scoped guardrail policy and decision contracts."""
+"""Immutable scoped guardrail policy and decision contracts."""
 
 from __future__ import annotations
 
@@ -97,19 +97,33 @@ class GuardrailCheck(ContractModel):
 
 
 class GuardrailPolicy(ContractModel):
-    """Immutable guardrail assignment for one organization-scoped identity.
+    """Immutable guardrail policy, scoped to the platform or one identity.
 
-    Lookup is ``(organization_id, identity_id)``. Identities are unique only
+    Omit both scope IDs for a protected platform policy. Scoped identity lookup
+    is ``(organization_id, identity_id)``. Identities are unique only
     inside an organization, so the same identity ID in two organizations
     cannot share a policy. ``protected`` fail-closes on adapter timeout,
     missing adapter, oversized payload, or any other classifier uncertainty.
     Non-protected identities skip a failed check and continue the remaining
     chain.
+
+    Attributes:
+        policy_id: Unique operator-authored policy identity.
+        organization_id: Identity's organization, or None for platform scope.
+        identity_id: Assigned identity, or None for platform scope.
+        revision: Detector and rollout revision used to invalidate cached replay.
+        input_execution: Inspect before dispatch by default, or overlap safe generation.
+        protected: Fail closed on classifier uncertainty; required for platform policies.
+        checks: Ordered checks, empty by default.
+        max_request_bytes: Total canonical input inspection bound, default 1 MiB.
+        max_response_bytes: Total canonical output inspection bound, default 1 MiB.
     """
 
     policy_id: ArtifactId
-    organization_id: OrganizationId
-    identity_id: IdentityId
+    organization_id: OrganizationId | None = None
+    identity_id: IdentityId | None = None
+    revision: str = Field(default="configured", min_length=1, max_length=256)
+    input_execution: Literal["before_dispatch", "parallel"] = "before_dispatch"
     protected: bool = False
     checks: tuple[GuardrailCheck, ...] = ()
     max_request_bytes: int = Field(default=DEFAULT_MAX_REQUEST_BYTES, ge=1, le=64 * 1024 * 1024)
@@ -128,7 +142,17 @@ class GuardrailPolicy(ContractModel):
         ids = tuple(check.check_id for check in self.checks)
         if len(set(ids)) != len(ids):
             raise ValueError("guardrail check IDs must be unique")
+        if (self.organization_id is None) != (self.identity_id is None):
+            raise ValueError("guardrail scope requires both organization_id and identity_id")
+        if self.organization_id is None and not self.protected:
+            raise ValueError("platform guardrail policies must be protected")
         return self
+
+    def bind(self, organization_id: OrganizationId, identity_id: IdentityId) -> GuardrailPolicy:
+        """Capture authenticated decision metadata without changing checks or execution mode."""
+        return self.model_copy(
+            update={"organization_id": organization_id, "identity_id": identity_id}
+        )
 
     @property
     def input_checks(self) -> tuple[GuardrailCheck, ...]:
@@ -141,54 +165,6 @@ class GuardrailPolicy(ContractModel):
         return tuple(check for check in self.checks if check.stage is GuardrailCheckStage.OUTPUT)
 
 
-class MandatoryGuardrailPolicy(ContractModel):
-    """Operator-owned checks applied by the engine before customer policy.
-
-    Attributes:
-        policy_id: Stable identity used by the existing decision recorder.
-        revision: Immutable policy, model, and rollout revision for replay binding.
-        checks: Ordered blocking checks registered with the engine's classifier client.
-        max_request_bytes: Bound on the full canonical input subject.
-        max_response_bytes: Bound on all inspected output in one request session.
-        input_execution: Inspect before dispatch, or overlap input-only checks with
-            generation while withholding every response until approval.
-    """
-
-    policy_id: ArtifactId
-    revision: str = Field(min_length=1, max_length=256)
-    checks: tuple[GuardrailCheck, ...]
-    input_execution: Literal["before_dispatch", "parallel"] = "before_dispatch"
-    max_request_bytes: int = Field(default=DEFAULT_MAX_REQUEST_BYTES, ge=1, le=64 * 1024 * 1024)
-    max_response_bytes: int = Field(default=DEFAULT_MAX_RESPONSE_BYTES, ge=1, le=1_048_576)
-
-    @model_validator(mode="after")
-    def _require_blocking_checks(self) -> MandatoryGuardrailPolicy:
-        """Keep mandatory decisions fail-closed and independent of customer rewrites."""
-        if not self.checks or any(
-            check.action is not GuardrailAction.BLOCK for check in self.checks
-        ):
-            raise ValueError("mandatory guardrail policies require one or more blocking checks")
-        if len({check.check_id for check in self.checks}) != len(self.checks):
-            raise ValueError("mandatory guardrail check IDs must be unique")
-        if self.input_execution == "parallel" and any(
-            check.stage is not GuardrailCheckStage.INPUT for check in self.checks
-        ):
-            raise ValueError("parallel mandatory guardrails require input-only checks")
-        return self
-
-    def bind(self, organization_id: OrganizationId, identity_id: IdentityId) -> GuardrailPolicy:
-        """Bind operator checks to authenticated authority independently of identity settings."""
-        return GuardrailPolicy(
-            policy_id=self.policy_id,
-            organization_id=organization_id,
-            identity_id=identity_id,
-            protected=True,
-            checks=self.checks,
-            max_request_bytes=self.max_request_bytes,
-            max_response_bytes=self.max_response_bytes,
-        )
-
-
 class GuardrailToolCall(ContractModel):
     """One completed tool invocation presented to an output check."""
 
@@ -198,11 +174,12 @@ class GuardrailToolCall(ContractModel):
 
 
 class GuardrailCompletion(ContractModel):
-    """Winning normalized completion inspected once before any caller delivery."""
+    """Normalized output subject, including readable alternate channels in ``context``."""
 
     text: str = ""
     refusal: bool = False
     tool_calls: tuple[GuardrailToolCall, ...] = ()
+    context: tuple[str, ...] = ()
 
     def content_bytes(self) -> int:
         """Return the UTF-8 size of the complete serialized classifier subject.

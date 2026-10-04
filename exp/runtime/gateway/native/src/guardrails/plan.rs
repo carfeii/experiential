@@ -15,8 +15,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::{projection, Completion};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::errors::{Failure, FailureClass};
 use crate::events::Event;
@@ -56,20 +57,6 @@ pub struct OutputPlan {
     pub checks: Vec<PlanCheck>,
 }
 
-/// The buffered completion projection an output check inspects.
-struct Completion {
-    text: String,
-    refusal: bool,
-    tool_calls: Vec<ToolCall>,
-}
-
-/// One completed tool invocation presented to an output check.
-struct ToolCall {
-    call_id: String,
-    name: String,
-    arguments: String,
-}
-
 /// Build one fail-closed guardrail failure without completion content.
 fn error_failure() -> Failure {
     Failure::new(
@@ -86,55 +73,13 @@ fn block_failure() -> Failure {
     )
 }
 
-/// Project collected events into the inspected completion.
-fn projection(events: &[Event]) -> Completion {
-    let mut completion = Completion {
-        text: String::new(),
-        refusal: false,
-        tool_calls: Vec::new(),
-    };
-    for event in events {
-        match event {
-            Event::TextDelta(delta) | Event::ProviderTextDelta { delta, .. } => {
-                completion.text.push_str(delta);
-            }
-            Event::RefusalDelta(_) | Event::ProviderRefusalDelta { .. } => {
-                completion.refusal = true;
-            }
-            Event::ToolCallCompleted { call, .. } => completion.tool_calls.push(ToolCall {
-                call_id: call.call_id.clone(),
-                name: call.name.clone(),
-                arguments: call.raw_arguments.clone(),
-            }),
-            _ => {}
-        }
-    }
-    completion
-}
-
 /// The UTF-8 size of the canonical classifier subject.
 ///
 /// This mirrors `GuardrailCompletion.content_bytes`: deterministic JSON with
 /// sorted keys, no insignificant whitespace, and no ASCII escaping, so the
 /// native bound admits and rejects exactly what the python bound does.
 fn content_bytes(completion: &Completion) -> usize {
-    let calls: Vec<Value> = completion
-        .tool_calls
-        .iter()
-        .map(|call| {
-            json!({
-                "arguments": call.arguments,
-                "call_id": call.call_id,
-                "name": call.name,
-            })
-        })
-        .collect();
-    let subject = json!({
-        "refusal": completion.refusal,
-        "text": completion.text,
-        "tool_calls": calls,
-    });
-    crate::encode::compact_json(&subject).len()
+    crate::encode::compact_json(&json!(completion)).len()
 }
 
 /// Emit one content-free decision line, the native mirror of the python
@@ -161,7 +106,10 @@ fn record(plan: &OutputPlan, check: Option<&PlanCheck>, action: &str, elapsed: D
 fn uncertain(plan: &OutputPlan, check: &PlanCheck) -> Result<(), Failure> {
     record(plan, Some(check), "error", Duration::ZERO);
     if plan.protected {
-        return Err(error_failure());
+        return Err(Failure::new(
+            FailureClass::Unavailable,
+            "Content inspection is unavailable. Retry later.",
+        ));
     }
     Ok(())
 }
@@ -211,6 +159,12 @@ pub fn enforce(
         };
         let mut flagged = redacted.is_some();
         let mut limited = false;
+        for context in &completion.context {
+            match detector.matches(context) {
+                Ok(found) => flagged |= found,
+                Err(_) => limited = true,
+            }
+        }
         for call in &completion.tool_calls {
             match detector.matches(&call.arguments) {
                 Ok(found) => flagged |= found,
@@ -239,8 +193,8 @@ pub fn enforce(
                 }
                 if let Some(value) = redacted {
                     text = value;
-                    rewritten = true;
                 }
+                rewritten = true;
             }
             "block" => return Err(block_failure()),
             _ => return Err(error_failure()),
@@ -339,6 +293,31 @@ mod tests {
     }
 
     #[test]
+    fn a_split_match_in_reasoning_is_inspected_and_scrubbed() {
+        let events = vec![
+            Event::TextDelta("allowed text".into()),
+            Event::ThinkingDelta {
+                index: 0,
+                delta: "ada@ex".into(),
+            },
+            Event::ThinkingDelta {
+                index: 0,
+                delta: "ample.com".into(),
+            },
+            Event::Completed,
+        ];
+        let result = enforce(
+            &plan("modify", true),
+            &detectors("pii", "[R]"),
+            events,
+            deadline(),
+        )
+        .expect("context-only matches suppress the unsafe alternate channel");
+        assert_eq!(result.len(), 2);
+        assert!(matches!(&result[0], Event::TextDelta(text) if text == "allowed text"));
+    }
+
+    #[test]
     fn a_block_check_fails_the_request() {
         let events = vec![Event::TextDelta("ada@example.com".to_string())];
         let failure = enforce(
@@ -387,7 +366,9 @@ mod tests {
     fn a_missing_adapter_fails_closed_only_when_protected() {
         let events = vec![Event::TextDelta("ada@example.com".to_string())];
         let empty: DetectorMap = HashMap::new();
-        assert!(enforce(&plan("modify", true), &empty, events.clone(), deadline()).is_err());
+        let failure = enforce(&plan("modify", true), &empty, events.clone(), deadline())
+            .expect_err("protected policies require a classifier verdict");
+        assert_eq!(failure.failure_class, FailureClass::Unavailable);
         let skipped = enforce(&plan("modify", false), &empty, events, deadline())
             .expect("a non protected identity skips the check");
         assert!(matches!(skipped[0], Event::TextDelta(ref text) if text == "ada@example.com"));

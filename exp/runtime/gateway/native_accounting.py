@@ -25,7 +25,7 @@ from exp.runtime.gateway.contracts import (
     GatewayFailureClass,
 )
 from exp.runtime.gateway.disconnect_estimate import settled_terminal
-from exp.runtime.gateway.guardrails.input_gate import discard_input_gate
+from exp.runtime.gateway.guardrails.session import discard_guardrails
 from exp.runtime.gateway.health import DeploymentHealthRegistry
 from exp.runtime.gateway.lane_saturation import lane_saturated_failure, overflow_target
 from exp.runtime.gateway.ledger import AttemptRejectedError
@@ -361,7 +361,7 @@ class NativeAttemptAccounting:
             )
             self.finish_request_quietly(entry.authorization, failure)
             with self._lock:
-                discard_input_gate(self._inflight.pop(request_id, None))
+                discard_guardrails(self._inflight.pop(request_id, None))
             raise NativeBridgeError(public_failure_error(failure))
         failure = failure_from_boundary_payload(data.get("failure"))
         current_depth = data.get("current_depth")
@@ -571,7 +571,7 @@ class NativeAttemptAccounting:
                     )
                     self.finish_request_quietly(entry.authorization, budget_quota_failure())
                     with self._lock:
-                        discard_input_gate(self._inflight.pop(request_id, None))
+                        discard_guardrails(self._inflight.pop(request_id, None))
                     raise error from exc
                 # A route whose hard monthly allocation cannot admit this
                 # call is skipped; a later certified route may still serve.
@@ -603,7 +603,7 @@ class NativeAttemptAccounting:
                     ),
                 )
                 with self._lock:
-                    discard_input_gate(self._inflight.pop(request_id, None))
+                    discard_guardrails(self._inflight.pop(request_id, None))
                 raise error from exc
             if ticket is not None:
                 self._loads.bind(ticket, attempt_id)
@@ -651,7 +651,7 @@ class NativeAttemptAccounting:
         )
         with self._lock:
             if entry.pending_abandon is None:
-                discard_input_gate(self._inflight.pop(request_id, None))
+                discard_guardrails(self._inflight.pop(request_id, None))
         return exhausted_attempt_payload(exhaustion, known_unbilled=capacity_refused and certified)
 
     def settle(self, argument: str) -> str:
@@ -717,7 +717,7 @@ class NativeAttemptAccounting:
         )
         with self._lock:
             if finalize:
-                discard_input_gate(self._inflight.pop(request_id, None))
+                discard_guardrails(self._inflight.pop(request_id, None))
             elif entry.active_attempt_id == attempt_id:
                 entry.active_attempt_id = None
         return "{}"
@@ -758,8 +758,8 @@ class NativeAttemptAccounting:
             if entry.pending_abandon is None:
                 entry.pending_abandon = failure
             failure = entry.pending_abandon
-        if entry.input_guardrail_gate is not None:
-            failure = entry.input_guardrail_gate.settlement_failure() or failure
+        if entry.guardrails is not None:
+            failure = entry.guardrails.settlement_failure() or failure
         if not entry.execution_lock.acquire(blocking=False):
             return "{}"
         try:
@@ -788,7 +788,7 @@ class NativeAttemptAccounting:
             except Exception as exc:  # noqa: BLE001 - the data plane retries.
                 raise authority_error(exc) from exc
             with self._lock:
-                discard_input_gate(self._inflight.pop(request_id, None))
+                discard_guardrails(self._inflight.pop(request_id, None))
             return "{}"
         finally:
             entry.execution_lock.release()
@@ -992,7 +992,7 @@ class NativeAttemptAccounting:
         )
         with self._lock:
             if finalize:
-                discard_input_gate(self._inflight.pop(request_id, None))
+                discard_guardrails(self._inflight.pop(request_id, None))
             elif entry.active_attempt_id == attempt_id:
                 entry.active_attempt_id = None
         return True

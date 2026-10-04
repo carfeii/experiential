@@ -39,7 +39,7 @@ async fn run_probabilities(harness: &Harness, route: &[DeploymentWire]) -> (Won,
         output_less_retention: None,
         output_token_cap: None,
         tool_search: None,
-        inspection: None,
+        output_guardrails: None,
     };
     (acquire_attempt(&context, &mut guard).await, guard)
 }

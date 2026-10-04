@@ -8,6 +8,7 @@ import socket
 import sqlite3
 import threading
 import time
+from collections.abc import Coroutine
 from concurrent.futures import Future, ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -21,7 +22,7 @@ from exp.common.core.artifacts import JsonObject
 from exp.common.models import BillingSource, GatewayTokenPrices, ModelCapabilities
 from exp.runtime.gateway.budgets import BudgetReservationRejected, BudgetScopeKind
 from exp.runtime.gateway.contracts import GatewayRequest
-from exp.runtime.gateway.guardrails import native as native_guardrails
+from exp.runtime.gateway.guardrails import session as guardrail_session
 from exp.runtime.gateway.guardrails.classifiers import ClassifierRegistry
 from exp.runtime.gateway.guardrails.client import DirectClassifierClient
 from exp.runtime.gateway.guardrails.contracts import (
@@ -31,10 +32,9 @@ from exp.runtime.gateway.guardrails.contracts import (
     GuardrailCheck,
     GuardrailCheckStage,
     GuardrailCompletion,
-    MandatoryGuardrailPolicy,
+    GuardrailPolicy,
 )
 from exp.runtime.gateway.guardrails.enforcement import GuardrailEngine
-from exp.runtime.gateway.guardrails.input_gate import InputGuardrailGate
 from exp.runtime.gateway.guardrails.store import MappingGuardrailStore
 from exp.runtime.gateway.lifecycle import load_gateway_components
 from exp.runtime.gateway.lifecycle_test import _configured_gateway
@@ -83,8 +83,13 @@ def test_customer_funded_deadline_race_terminalizes_accepted_request(
     result: Future[None] = Future()
     result.set_result(None)
     monkeypatch.setattr(result, "result", Mock(side_effect=[TimeoutError(), None]))
-    gate = InputGuardrailGate(result, time.monotonic() + 3)
-    monkeypatch.setattr(native_guardrails, "start_input_gate", Mock(return_value=gate))
+
+    def start(coroutine: Coroutine[None, None, None]) -> Future[None]:
+        """Bind the controlled race without leaving an unawaited fixture coroutine."""
+        coroutine.close()
+        return result
+
+    monkeypatch.setattr(guardrail_session, "start_on_native_loop", start)
     _, key = _configured_gateway(tmp_path, base_url="http://127.0.0.1:1/v1")
     components = load_gateway_components(tmp_path, environment={"TEST_PROVIDER_KEY": "fixture"})
     control = NativeControlPlane(components, guardrails=_engine(_Classifier("allow")))
@@ -241,26 +246,30 @@ class _Classifier:
 
 
 def _engine(classifier: _Classifier, timeout_ms: int = 3000) -> GuardrailEngine:
-    """Compose parallel input inspection through the existing public engine seam."""
+    """Compose the input-only policy through the same scoped store as every other guardrail."""
     return GuardrailEngine(
-        store=MappingGuardrailStore(()),
+        store=MappingGuardrailStore(
+            (
+                GuardrailPolicy(
+                    policy_id="criminal-input",
+                    revision="fixture-v1",
+                    protected=True,
+                    input_execution="parallel",
+                    checks=(
+                        GuardrailCheck(
+                            check_id="criminal",
+                            capability=GuardrailCapabilityKind.CONTENT_SAFETY,
+                            stage=GuardrailCheckStage.INPUT,
+                            action=GuardrailAction.BLOCK,
+                            adapter_id="criminal",
+                            timeout_ms=timeout_ms,
+                        ),
+                    ),
+                ),
+            )
+        ),
         client=DirectClassifierClient(ClassifierRegistry({"criminal": classifier})),
         monotonic=time.monotonic,
-        mandatory_policy=MandatoryGuardrailPolicy(
-            policy_id="criminal-input",
-            revision="fixture-v1",
-            input_execution="parallel",
-            checks=(
-                GuardrailCheck(
-                    check_id="criminal",
-                    capability=GuardrailCapabilityKind.CONTENT_SAFETY,
-                    stage=GuardrailCheckStage.INPUT,
-                    action=GuardrailAction.BLOCK,
-                    adapter_id="criminal",
-                    timeout_ms=timeout_ms,
-                ),
-            ),
-        ),
     )
 
 
