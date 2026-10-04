@@ -1550,6 +1550,47 @@ class TestLaneSaturation:
         assert advanced["route_depth"] == 1
         assert ledger.started[-1]["deployment_id"] == "deployment-b"
 
+    def test_cache_placed_session_is_warm_below_the_bound_on_a_fresh_worker(self) -> None:
+        """A placed session with no local sticky binding is admitted, not 429'd, under the bound.
+
+        The fresh-session early threshold reserves the top slice of the bound
+        for warm sessions; a refusing rung the host's placement names keeps the
+        session through sheds, so classing it fresh would refuse a free caller
+        while the rung still has headroom.
+        """
+        ledger = _RecordingLedger()
+        registry = NativeAttemptAccounting(ledger)
+        policy = GatewayRungDispatchPolicy(
+            concurrency_bound=2,
+            fresh_session_spill_fraction=0.5,
+            sticky_spill_seconds=600,
+            saturation="refuse",
+        )
+        deployments = (
+            _deployment("deployment-a", connection_sha256="b" * 64, dispatch=policy),
+            _deployment("deployment-b", connection_sha256="c" * 64, dispatch=policy),
+        )
+        _admit(
+            registry,
+            deployments,
+            request_id="occupied",
+            failover_mode="maximize_cache_affinity",
+            affinity_fingerprint=b"conversation-1",
+        )
+        assert _start(registry, ordinal=0, request_id="occupied")["route_depth"] == 0
+        _admit(
+            registry,
+            deployments,
+            request_id="placed",
+            failover_mode="maximize_cache_affinity",
+            affinity_fingerprint=b"conversation-2",
+            cache_placed_deployment_id="deployment-a",
+        )
+        placed = _start(registry, ordinal=0, request_id="placed")
+        assert placed.get("exhausted") is not True
+        assert placed["route_depth"] == 0
+        assert registry.rung_rate_counters() == (0, 0)
+
     @pytest.mark.parametrize("authored", [False, True])
     @pytest.mark.parametrize("conditional_child", [False, True])
     def test_root_child_capacity_refusal_preserves_existing_reservations(

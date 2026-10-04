@@ -82,6 +82,14 @@ class GatewayRoute(ContractModel):
 
     Attributes:
         resolved_route_id: Optional host attestation that the requested public handle leads.
+        cache_placed_deployment_id: The deployment the host's cache placement says holds this
+            conversation's prompt cache, default ``None`` (no live placement). When set and that
+            rung authors ``saturation="refuse"``, a per-worker policy shed of it on the
+            request's first dispatch never spills to another rung: a priority caller is
+            force-admitted there up to its ceiling and every other caller gets the
+            ``lane_saturated`` 429, so the retry lands on the warm rung instead of a cold one
+            recomputing the whole prefix. A real failure on the rung still fails over, and a
+            rung with a soft or default bound keeps the historical spill.
     """
 
     snapshot: ExecutionSnapshot
@@ -101,18 +109,6 @@ class GatewayRoute(ContractModel):
     payload is built, and the payload builders still reject a foreign block.
     """
     cache_placed_deployment_id: str | None = None
-    """The deployment the host's cache placement says holds this conversation's prompt cache.
-
-    ``None`` without a live placement. When set and that rung authors
-    ``saturation="refuse"``, a per-worker policy shed of it (``queue_bound``,
-    ``fair_share_shed``, ``rate_limit``, ``fresh_session_spill``) on the
-    request's first dispatch never spills to another rung: the shed is
-    force-admitted under the rung's own overflow rule (a priority caller up to
-    its ceiling) and otherwise refused with the ``lane_saturated`` 429, so the
-    caller retries onto its warm rung instead of a cold one recomputing the
-    whole prefix. A real failure on the rung still fails over as usual, and a
-    rung with a soft or default bound keeps the historical spill.
-    """
 
     @property
     def deployments(self) -> tuple[ExactModelDeployment, ...]:

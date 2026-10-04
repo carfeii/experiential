@@ -793,15 +793,13 @@ def select_route_deployments(
     if indexes == tuple(range(len(deployments))):
         return route
     selected = tuple(deployments[index] for index in indexes)
-    return GatewayRoute(
-        snapshot=project_stage_selection(route.snapshot, indexes),
-        deployment=selected[0],
-        fallback_deployments=selected[1:],
-        route_reason=route.route_reason,
-        fallback_reason=route.fallback_reason,
-        reasoning_pinned_deployment_id=route.reasoning_pinned_deployment_id,
-        cache_placed_deployment_id=route.cache_placed_deployment_id,
-        resolved_route_id=route.resolved_route_id,
+    # A copy, so every per-request route fact (pins, placement) rides along.
+    return route.model_copy(
+        update={
+            "snapshot": project_stage_selection(route.snapshot, indexes),
+            "deployment": selected[0],
+            "fallback_deployments": selected[1:],
+        }
     )
 
 
@@ -841,15 +839,13 @@ def reorder_route_deployments(
     ) != tuple(route.snapshot.stage_for_depth(i).stage_index for i in range(len(deployments))):
         raise ValueError("route scheduling cannot cross a model reference boundary")
     selected = tuple(deployments[index] for index in order)
-    return GatewayRoute(
-        snapshot=project_stage_selection(route.snapshot, order),
-        deployment=selected[0],
-        fallback_deployments=selected[1:],
-        route_reason=route.route_reason,
-        fallback_reason=route.fallback_reason,
-        reasoning_pinned_deployment_id=route.reasoning_pinned_deployment_id,
-        cache_placed_deployment_id=route.cache_placed_deployment_id,
-        resolved_route_id=route.resolved_route_id,
+    # A copy, so every per-request route fact (pins, placement) rides along.
+    return route.model_copy(
+        update={
+            "snapshot": project_stage_selection(route.snapshot, order),
+            "deployment": selected[0],
+            "fallback_deployments": selected[1:],
+        }
     )
 
 

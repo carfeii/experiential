@@ -100,7 +100,20 @@ def reserve_rung_slot(
         else None
     )
     warm_session = True
-    if fresh_fraction is not None and entry.affinity_fingerprint is not None:
+    if (
+        fresh_fraction is not None
+        and entry.affinity_fingerprint is not None
+        and not (
+            # A refusing rung the host's fleet-wide cache placement names is
+            # warm standing even with no binding on THIS worker: it is kept
+            # through every shed (``shed_keeps_pin``), so classing it fresh
+            # would answer a free caller 429 below the hard bound, in the very
+            # top slice reserved for sessions whose cache lives here.
+            deployment.deployment_id == entry.route.cache_placed_deployment_id
+            and policy is not None
+            and policy.saturation == "refuse"
+        )
+    ):
         warm_session = (
             entry.verified_warm_deployment_id == deployment.deployment_id
             and time.monotonic() < entry.verified_warm_until_monotonic
