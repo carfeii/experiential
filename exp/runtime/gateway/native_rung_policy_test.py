@@ -688,3 +688,23 @@ def test_shed_keeps_rung_force_admits_a_rate_shed_redial_and_the_first_pinned_di
         assert shed_keeps_rung(pinned, 0, None, None, reason) is True
         assert shed_keeps_rung(pinned, 0, None, _THROTTLE, reason) is False
         assert shed_keeps_rung(pinned, 1, None, None, reason) is False
+
+
+def test_shed_keeps_the_cache_placed_rung_on_the_first_dispatch_only() -> None:
+    """A cache-placed rung is kept through every shed until a real failure on it."""
+    deployments = (
+        _deployment("deployment-a", connection_sha256="b" * 64),
+        _deployment("deployment-b", connection_sha256="c" * 64),
+    )
+    route = _entry(deployments).route
+    placed = route.model_copy(update={"cache_placed_deployment_id": "deployment-b"})
+    assert shed_keeps_pin(placed, 1) is True
+    assert shed_keeps_pin(placed, 0) is False
+    for reason in ("rate_limit", "queue_bound", "fair_share_shed", "fresh_session_spill"):
+        assert shed_keeps_rung(placed, 1, None, None, reason) is True
+        assert shed_keeps_rung(placed, 1, None, _THROTTLE, reason) is False
+        assert shed_keeps_rung(placed, 0, None, None, reason) is False
+    # A placement naming a rung the route no longer carries keeps nothing.
+    gone = route.model_copy(update={"cache_placed_deployment_id": "deployment-gone"})
+    assert shed_keeps_pin(gone, 0) is False
+    assert shed_keeps_pin(gone, 1) is False

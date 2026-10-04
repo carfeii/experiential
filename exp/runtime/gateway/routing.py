@@ -100,6 +100,17 @@ class GatewayRoute(ContractModel):
     another provider's payload: the strip removes them before the fallback
     payload is built, and the payload builders still reject a foreign block.
     """
+    cache_placed_deployment_id: str | None = None
+    """The deployment the host's cache placement says holds this conversation's prompt cache.
+
+    ``None`` without a live placement. When set, a per-worker policy shed of
+    that rung (``queue_bound``, ``fair_share_shed``, ``rate_limit``,
+    ``fresh_session_spill``) on the request's first dispatch never spills to
+    another rung: the shed is force-admitted under the rung's own overflow rule
+    and refused with the ``lane_saturated`` 429 where that rule refuses, so the
+    caller retries onto its warm rung instead of a cold one recomputing the
+    whole prefix. A real failure on the rung still fails over as usual.
+    """
 
     @property
     def deployments(self) -> tuple[ExactModelDeployment, ...]:

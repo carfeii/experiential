@@ -262,13 +262,20 @@ def failed_dispatch_candidate(
 def shed_keeps_pin(route: GatewayRoute, candidate: int) -> bool:
     """Whether a policy shed of ``candidate`` must force-admit it rather than spill sideways.
 
-    True only for the issuing rung of a reasoning-pinned route. Its fallbacks
-    dispatch without the request's sealed reasoning, a loss reserved for a real
-    failover-eligible failure on the pinned rung (a throttle once its redial
-    budget is spent, provider quota, unavailability, transport), never for a
-    per-worker rate or concurrency shed the rung itself authored, which trips
-    under ordinary load. The shed is disclosed as ``saturated_overflow`` exactly
-    as a one-rung ladder's is.
+    True for the issuing rung of a reasoning-pinned route and for the rung the
+    host's cache placement names (``cache_placed_deployment_id``). A reasoning
+    pin's fallbacks dispatch without the request's sealed reasoning; a cache
+    placement's fallbacks hold none of the conversation's prompt cache and
+    recompute its whole prefix (on Experiential Cloud's twin vLLM nodes, a
+    100k-token prefill per spilled turn). Both losses are reserved for a real
+    failover-eligible failure on the rung (a throttle once its redial budget is
+    spent, provider quota, unavailability, transport), never for a per-worker
+    rate or concurrency shed the rung itself authored, which trips under
+    ordinary load. The shed is disclosed as ``saturated_overflow`` exactly as a
+    one-rung ladder's is, and a rung whose overflow rule refuses (an authored
+    ``saturation="refuse"`` for a non-priority caller, or the worker's default
+    bound) answers the ``lane_saturated`` 429 so the caller retries onto the
+    same warm rung.
 
     Args:
         route: The admitted route.
@@ -277,8 +284,11 @@ def shed_keeps_pin(route: GatewayRoute, candidate: int) -> bool:
     Returns:
         Whether the accounting keeps the candidate and admits it past the policy.
     """
+    deployment = route.deployments[candidate]
+    if deployment.deployment_id == route.cache_placed_deployment_id:
+        return True
     return route.reasoning_pinned_deployment_id is not None and not route.requires_reasoning_strip(
-        route.deployments[candidate]
+        deployment
     )
 
 
@@ -306,8 +316,9 @@ def shed_keeps_rung(
     protects the provider connection and the other tenants on the rung, and it
     stays hard for everyone, so a redial shed by it spills sideways exactly
     like any other dispatch. The other case is the issuing rung of a
-    reasoning-pinned route on its first dispatch (``shed_keeps_pin``), before
-    any real failure on it, for every shed reason. Every other shed spills.
+    reasoning-pinned route, or the cache-placed rung, on the request's first
+    dispatch (``shed_keeps_pin``), before any real failure on it, for every
+    shed reason. Every other shed spills.
 
     Args:
         route: The admitted route.

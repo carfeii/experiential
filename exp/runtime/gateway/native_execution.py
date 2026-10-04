@@ -800,6 +800,7 @@ def select_route_deployments(
         route_reason=route.route_reason,
         fallback_reason=route.fallback_reason,
         reasoning_pinned_deployment_id=route.reasoning_pinned_deployment_id,
+        cache_placed_deployment_id=route.cache_placed_deployment_id,
         resolved_route_id=route.resolved_route_id,
     )
 
@@ -847,6 +848,7 @@ def reorder_route_deployments(
         route_reason=route.route_reason,
         fallback_reason=route.fallback_reason,
         reasoning_pinned_deployment_id=route.reasoning_pinned_deployment_id,
+        cache_placed_deployment_id=route.cache_placed_deployment_id,
         resolved_route_id=route.resolved_route_id,
     )
 

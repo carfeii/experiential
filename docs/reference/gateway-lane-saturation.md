@@ -51,6 +51,16 @@ lane. Nothing is down, so it is not
 bypass that was not a registry shed (a cold throttle failover) keeps the historical overflow.
 A reasoning-pinned continuation's first dispatch still force-admits its pinned rung for every
 shed reason (`shed_keeps_pin`), the documented continuity-over-spill trade.
+A conversation the host's cache placement names (`GatewayRoute.cache_placed_deployment_id`,
+set by the hosted platform from its fleet-wide `gateway_cache_placements`) is kept on that rung
+the same way on its first dispatch: a shed there never spills to a sibling rung holding none of
+its prompt cache. It force-admits under the rung's own overflow rule, so a free caller on a
+`refuse` rung gets the 429 above and retries onto the same warm rung, while a priority caller
+overflows that rung up to its ceiling. Only a real failure on the rung (transport, timeout,
+provider error, a circuit-open or throttled rung) fails over, and a request with no placement
+balances across the rungs exactly as before. On Experiential Cloud's twin vLLM nodes a spilled
+turn recomputed its whole 100k-token prefix, and sheds caused about two thirds of the fleet's
+uncached prefill.
 
 ## Priority callers and default fairness
 
