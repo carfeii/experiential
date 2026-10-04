@@ -162,13 +162,34 @@ def overflow_target(
         # The first bypassed rung still below its priority ceiling; a rung
         # whose forced admission already hit the ceiling is skipped, never
         # retried, so the walk ends in a refusal once every rung is capped.
+        # Only a CAPACITY shed earns the priority exception: a rate-window
+        # shed keeps the free caller's rule (a selected route never overflows
+        # it), since forcing it would bypass the authored rate cap.
         for depth, _reason in policy_sheds:
             shed = shed_records.get(depth)
-            if shed is None or not shed.overflow_ceiling:
-                return depth
+            if shed is not None and shed.overflow_ceiling:
+                continue
+            if shed is not None and shed.reason == "rate_limit":
+                if route.resolved_route_id is not None:
+                    return None
+                return _historical_target(route, depth, shed)
+            return depth
         return None
     depth = policy_sheds[0][0]
-    shed = shed_records.get(depth)
+    return _historical_target(route, depth, shed_records.get(depth))
+
+
+def _historical_target(route: GatewayRoute, depth: int, shed: RungShed | None) -> int | None:
+    """The free caller's overflow rule for one bypassed rung: refuse a refusing bound.
+
+    Args:
+        route: The admitted route.
+        depth: The bypassed rung's route depth.
+        shed: The registry's shed on that rung, when the bypass was a reservation.
+
+    Returns:
+        ``depth`` to force-admit, or ``None`` when the rung's bound refuses.
+    """
     if shed is not None and shed.default_bound:
         return None
     policy = route.deployments[depth].gateway.dispatch

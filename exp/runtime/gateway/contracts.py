@@ -897,8 +897,7 @@ class AuthorizationSnapshot(ClientAttribution):
     """Immutable authority and alias target frozen before learned model selection.
 
     Attributes:
-        model_chain_authority: Optional backend-issued binding, revalidated by
-            the host at acceptance and every attempt reservation.
+        model_chain_authority: Optional backend binding, revalidated at acceptance and reservation.
         fair_share_weight: Organization weight in [1, 1,000,000], default 1.
         priority_admission: Host-vouched 0 free, 1 paying, 2 Pro (lane_saturation caps).
         descendant_start_authorized: False unless the host proves root funding

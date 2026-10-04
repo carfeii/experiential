@@ -187,3 +187,19 @@ def test_overflow_target_moves_past_a_capped_rung_to_the_next_bypassed_rung() ->
     assert overflow_target(route, [(0, "queue_bound"), (1, "queue_bound")], sheds) == 1
     sheds[1] = RungShed("queue_bound", overflow_ceiling=True)
     assert overflow_target(route, [(0, "queue_bound"), (1, "queue_bound")], sheds) is None
+
+
+def test_a_rate_window_shed_never_earns_the_priority_exception() -> None:
+    """Priority overflows capacity only: a rate shed keeps the free caller's rule."""
+    refusing = _route(
+        _deployment("a", GatewayRungDispatchPolicy(requests_per_minute=1, saturation="refuse")),
+        priority_admission=2,
+    )
+    rate = {0: RungShed("rate_limit")}
+    assert overflow_target(refusing, [(0, "rate_limit")], rate) is None
+    soft = _route(
+        _deployment("a", GatewayRungDispatchPolicy(requests_per_minute=1)), priority_admission=2
+    )
+    assert overflow_target(soft, [(0, "rate_limit")], rate) == 0
+    selected = soft.model_copy(update={"resolved_route_id": "route_" + "a" * 64})
+    assert overflow_target(selected, [(0, "rate_limit")], rate) is None

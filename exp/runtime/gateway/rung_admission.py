@@ -276,7 +276,7 @@ class RungLoadRegistry:
                 shed early; ``None`` disables the early threshold.
             force: Admit past soft policy limits when the caller permits overflow.
             hard_bound: Recheck the capacity ceiling even on a forced rate-window retry.
-            overflow_ceiling: In-flight cap a forced admission may not reach
+            overflow_ceiling: In-flight cap a forced admission may not exceed
                 (a priority caller overflowing a refusing bound); ``None`` = none.
             rate_retry: Skip rate windows, not capacity, fairness or fresh-session checks.
 
@@ -299,13 +299,14 @@ class RungLoadRegistry:
             # fractional ceiling floors: 1.5x a bound of 5 holds 7, never 8.
             if force and overflow_ceiling is not None and rung.total + 1 > overflow_ceiling:
                 return RungShed("queue_bound", overflow_ceiling=True)
-            if not force or rate_retry:
+            # A priority overflow (a ceiling) is forced past capacity only: its
+            # capacity is the ceiling checked above, and the rate windows still
+            # apply unless this is a scheduled rate redial.
+            if not force or rate_retry or overflow_ceiling is not None:
                 shed = self._shed_reason(
                     rung,
                     organization,
                     now=now,
-                    # A priority overflow's capacity is its ceiling (checked
-                    # above), so a forced rate redial rechecks only rate windows.
                     bound=None if force and overflow_ceiling is not None else bound,
                     fair_share=fair_share,
                     requests_per_minute=requests_per_minute,

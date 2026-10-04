@@ -96,11 +96,22 @@ class GatewayRungDispatchPolicy(ContractModel):
     """Authored per-rung dispatch controls: admission bounds, rates, and affinity.
 
     Every field defaults to inert so an unauthored rung behaves exactly as
-    today: unbounded admission, no rate windows, no fairness accounting,
-    rendezvous weight 1, no session stickiness. The bound, rate caps, and
-    fairness apply on any pool; the affinity weight, fresh-session threshold,
-    and sticky binding are read only under a pool's
-    ``maximize_cache_affinity`` policy.
+    today: unbounded admission, no rate windows, rendezvous weight 1, no
+    session stickiness. The bound and rate caps apply on any pool; the
+    affinity weight, fresh-session threshold, and sticky binding are read only
+    under a pool's ``maximize_cache_affinity`` policy. Weighted fairness is
+    always on for every bounded rung, whatever ``fair_share`` says.
+
+    Attributes:
+        fair_share: Authored fairness flag, default ``False``; it no longer
+            changes admission. Every bounded rung (an authored bound, or the
+            worker's default lane bound) limits each organization near the
+            bound to its weighted share (``AuthorizationSnapshot.fair_share_weight``),
+            work-conserving, with freed capacity reserved for recently active
+            under-share organizations. Retained because persisted catalog
+            snapshots serialize it and their identity digests read it; removal
+            waits for a snapshot cutover. An authored ``True`` still requires
+            ``concurrency_bound``.
     """
 
     concurrency_bound: int | None = Field(default=None, ge=1)
@@ -131,16 +142,6 @@ class GatewayRungDispatchPolicy(ContractModel):
     whose shed overflows up to its level's ceiling.
     """
     fair_share: bool = False
-    """Authored fairness flag; weighted fairness itself is ALWAYS on.
-
-    Every bounded rung (an authored bound, or the worker's default lane bound)
-    limits each organization near the bound to its weighted share (weights
-    ride ``AuthorizationSnapshot.fair_share_weight``), with freed capacity
-    reserved for recently active under-share organizations. Work-conserving: a
-    lone organization borrows the whole bound. The field stays because
-    persisted catalog snapshots serialize it and their identity digests read
-    it; an authored ``True`` still requires ``concurrency_bound``.
-    """
     affinity_weight: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     """Rendezvous weight under ``maximize_cache_affinity`` (``None`` means 1.0).
 

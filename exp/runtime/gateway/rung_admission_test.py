@@ -680,6 +680,23 @@ class TestPriorityOverflowCeiling:
         assert forced() == RungShed("queue_bound", overflow_ceiling=True)
         assert registry.inflight(_KEY) == 7
 
+    def test_forced_priority_overflow_still_honors_rate_windows(self) -> None:
+        """A forced admission under a ceiling passes the bound but not an exhausted rate window."""
+        registry = _registry([0.0])
+        assert isinstance(_reserve(registry, "org-a", bound=1, requests_per_minute=1), str)
+        shed = registry.reserve(
+            _KEY,
+            organization_id="org-pro",
+            weight=10,
+            bound=1,
+            fair_share=True,
+            requests_per_minute=1,
+            force=True,
+            overflow_ceiling=2.0,
+        )
+        assert isinstance(shed, RungShed)
+        assert shed.reason == "rate_limit"
+
     def test_forced_rate_redial_rechecks_only_rate_windows_under_a_ceiling(self) -> None:
         """A priority throttle redial at the bound is not shed by the bound it may overflow."""
         registry = _registry([0.0])
