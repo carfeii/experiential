@@ -128,7 +128,7 @@ def test_expired_session_cannot_authorize_a_late_segment() -> None:
     assert engine.classifier_calls == 1
 
 
-@pytest.mark.parametrize("marker", [None, True, "1", 0, 2])
+@pytest.mark.parametrize("marker", [None, True, "2", 0, 1, 3])
 def test_older_or_unknown_native_contract_cannot_bypass_output(marker: object) -> None:
     """Mandatory composition fails before a native package can ignore output inspection."""
     with (
@@ -136,7 +136,7 @@ def test_older_or_unknown_native_contract_cannot_bypass_output(marker: object) -
             "exp.runtime.gateway.guardrails.inspection.importlib.import_module",
             return_value=SimpleNamespace(GUARDRAIL_INSPECTION_CONTRACT_VERSION=marker),
         ),
-        pytest.raises(ValueError, match="GUARDRAIL_INSPECTION_CONTRACT_VERSION=1"),
+        pytest.raises(ValueError, match="GUARDRAIL_INSPECTION_CONTRACT_VERSION=2"),
     ):
         validate_guardrail_engine(_Guard())
 

@@ -210,6 +210,7 @@ async fn deliver(bridge: &Bridge, method: &'static str, argument: String) -> boo
 /// accepted request when no attempt is active.
 pub struct AttemptGuard {
     pub bridge: Arc<Bridge>,
+    pub(crate) input_gate: Option<Arc<crate::guardrails::input::InputGate>>,
     request_id: String,
     attempt_id: Option<String>,
     pending: Arc<AtomicUsize>,
@@ -284,6 +285,7 @@ impl AttemptGuard {
         METRICS.enter_request();
         Self {
             bridge,
+            input_gate: None,
             request_id,
             attempt_id: None,
             pending,
@@ -424,6 +426,17 @@ impl AttemptGuard {
         if !self.armed {
             return true;
         }
+        let input_failure = match self.input_gate.clone() {
+            Some(gate) => gate.wait(&self.bridge).await.err(),
+            None => None,
+        };
+        let outcome = if input_failure.is_some() {
+            "failed"
+        } else {
+            outcome
+        };
+        let finalize = finalize || input_failure.is_some();
+        let failure = input_failure.as_ref().or(failure);
         let Some(attempt_id) = self.attempt_id.clone() else {
             // No active attempt: nothing durable to close here. The abandon
             // path owns request-only terminalization.
@@ -438,13 +451,23 @@ impl AttemptGuard {
             .rate_limit_headers
             .as_ref()
             .or_else(|| failure.and_then(|failure| failure.rate_limit_headers.as_deref()));
+        // A failed input gate cancels provider work. Preserve the existing
+        // disconnected-meter contract; the host's frozen input decision supplies
+        // the public/durable failure and waives the customer charge separately.
+        let input_cancellation = input_failure.as_ref().map(|_| {
+            Failure::new(
+                FailureClass::Cancelled,
+                "Generation cancelled before input approval.",
+            )
+        });
+        let meter_failure = input_cancellation.as_ref().or(failure);
         let argument = settle_argument(
             &self.request_id,
             &attempt_id,
             outcome,
             usage,
             tool_names,
-            failure,
+            meter_failure,
             finalize,
             self.opened,
             self.first_token_at,
@@ -459,7 +482,8 @@ impl AttemptGuard {
             self.dispatched,
             self.dispatched
                 && observed.terminal.is_none()
-                && failure.is_some_and(|failure| failure.failure_class == FailureClass::Cancelled),
+                && meter_failure
+                    .is_some_and(|failure| failure.failure_class == FailureClass::Cancelled),
             &observed.streamed_output,
         );
         if finalize {

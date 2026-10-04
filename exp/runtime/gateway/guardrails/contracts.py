@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import Field, model_validator
 
@@ -149,11 +150,14 @@ class MandatoryGuardrailPolicy(ContractModel):
         checks: Ordered blocking checks registered with the engine's classifier client.
         max_request_bytes: Bound on the full canonical input subject.
         max_response_bytes: Bound on all inspected output in one request session.
+        input_execution: Inspect before dispatch, or overlap input-only checks with
+            generation while withholding every response until approval.
     """
 
     policy_id: ArtifactId
     revision: str = Field(min_length=1, max_length=256)
     checks: tuple[GuardrailCheck, ...]
+    input_execution: Literal["before_dispatch", "parallel"] = "before_dispatch"
     max_request_bytes: int = Field(default=DEFAULT_MAX_REQUEST_BYTES, ge=1, le=64 * 1024 * 1024)
     max_response_bytes: int = Field(default=DEFAULT_MAX_RESPONSE_BYTES, ge=1, le=1_048_576)
 
@@ -166,6 +170,10 @@ class MandatoryGuardrailPolicy(ContractModel):
             raise ValueError("mandatory guardrail policies require one or more blocking checks")
         if len({check.check_id for check in self.checks}) != len(self.checks):
             raise ValueError("mandatory guardrail check IDs must be unique")
+        if self.input_execution == "parallel" and any(
+            check.stage is not GuardrailCheckStage.INPUT for check in self.checks
+        ):
+            raise ValueError("parallel mandatory guardrails require input-only checks")
         return self
 
     def bind(self, organization_id: OrganizationId, identity_id: IdentityId) -> GuardrailPolicy:

@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Protocol, cast
 
 from exp.common.core.artifacts import JsonObject
+from exp.common.models import BillingSource
 from exp.runtime.gateway.contracts import AuthorizationSnapshot, GatewayRequest
 from exp.runtime.gateway.guardrails.bounded import run_on_native_loop
 from exp.runtime.gateway.guardrails.client import assert_not_internal_classification
@@ -21,12 +22,18 @@ from exp.runtime.gateway.guardrails.contracts import (
 )
 from exp.runtime.gateway.guardrails.deterministic import NativeDetector, native_input_request
 from exp.runtime.gateway.guardrails.enforcement import GuardrailEngine
+from exp.runtime.gateway.guardrails.input_gate import (
+    InputGuardrailGate,
+    gate_status,
+    start_input_gate,
+)
 from exp.runtime.gateway.guardrails.inspection import (
     GuardrailInspection,
     inspect_argument,
     open_inspection,
 )
 from exp.runtime.gateway.native_accounting_errors import NativeBridgeError
+from exp.runtime.gateway.routing import GatewayRoute
 from exp.runtime.openai_protocol.errors import public_failure_error
 
 if TYPE_CHECKING:
@@ -40,6 +47,7 @@ def inspect_native_input(
     request: GatewayRequest,
     deadline_monotonic: float,
     detectors: Mapping[str, NativeDetector] | None = None,
+    defer_mandatory: bool = False,
 ) -> tuple[GatewayRequest, GuardrailPolicy | None, GuardrailInspection | None]:
     """Check original intent and optional rewrites before dispatch or charging.
 
@@ -49,6 +57,7 @@ def inspect_native_input(
         request: Canonical request after continuation expansion.
         deadline_monotonic: Absolute request-wide inspection deadline.
         detectors: Compiled customer detectors indexed by adapter.
+        defer_mandatory: Start mandatory input-only work at final native admission.
 
     Returns:
         The transformed request, customer policy, and fresh host session.
@@ -57,8 +66,15 @@ def inspect_native_input(
         GuardrailRejected: Either policy rejected or could not inspect input.
         GuardrailRecursionError: A classifier re-entered the public route.
     """
-    session = open_inspection(
-        engine, authorization=authorization, request=request, deadline_monotonic=deadline_monotonic
+    session = (
+        None
+        if defer_mandatory
+        else open_inspection(
+            engine,
+            authorization=authorization,
+            request=request,
+            deadline_monotonic=deadline_monotonic,
+        )
     )
     transformed, policy = enforce_native_input(
         engine,
@@ -67,7 +83,7 @@ def inspect_native_input(
         deadline_monotonic=deadline_monotonic,
         detectors=detectors,
     )
-    if transformed != request:
+    if transformed != request and not defer_mandatory:
         session = open_inspection(
             engine,
             authorization=authorization,
@@ -388,6 +404,41 @@ class _GuardrailPlane(Protocol):
 
 class NativeGuardrailsMixin:
     """Native output callbacks bound to the admitted request's frozen policy."""
+
+    def prepare_parallel_input(
+        self: _GuardrailPlane,
+        authorization: AuthorizationSnapshot,
+        route: GatewayRoute,
+        subjects: tuple[GatewayRequest, ...],
+        deadline: float,
+        *,
+        parallel: bool,
+        has_cache: bool,
+    ) -> InputGuardrailGate | None:
+        """Start input-only inspection, keeping customer-funded and cache work serial."""
+        if not parallel or self._guardrails is None:
+            return None
+        gate = start_input_gate(self._guardrails, authorization, subjects, deadline)
+        if not has_cache and all(
+            deployment.billing_source is BillingSource.HOST_MANAGED
+            for deployment in route.deployments
+        ):
+            return gate
+        try:
+            gate.future.result(timeout=max(0, deadline - time.monotonic()))
+        except Exception:  # noqa: BLE001 - preserve only the sanitized engine failure.
+            failure = gate.settlement_failure()
+            assert failure is not None
+            gate.cancel()
+            self._accounting.finish_request_quietly(authorization, failure)
+            raise NativeBridgeError(public_failure_error(failure)) from None
+        return None
+
+    def guardrail_input_status(self: _GuardrailPlane, argument: str) -> str:
+        """Poll one request-owned input decision without tying up a bridge worker."""
+        request_id = str(json.loads(argument).get("request_id") or "")
+        entry = self._accounting.entry(request_id)
+        return gate_status(None if entry is None else entry.input_guardrail_gate)
 
     def reopen_guardrail_inspection(
         self: _GuardrailPlane,

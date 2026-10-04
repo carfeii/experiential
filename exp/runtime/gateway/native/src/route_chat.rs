@@ -2,6 +2,7 @@
 //! handler with its keyed-replay protocol, plus the chat-shaped settled,
 //! aggregated, guarded, and live-streaming response paths.
 
+use crate::guardrails::input::acquire_guarded_attempt;
 use std::sync::atomic::Ordering;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -35,7 +36,7 @@ use crate::settlement::{settle_guarded_failure, AttemptGuard};
 use crate::tool_search::{
     adopt_outcome, annotate_chat_completion_for, configure_chat_encoder, disclose_after_collection,
 };
-use crate::waterfall::{acquire_attempt, CommittedAttempt, SettledAttempt, WaterfallContext, Won};
+use crate::waterfall::{CommittedAttempt, SettledAttempt, WaterfallContext, Won};
 
 pub(crate) async fn chat(
     State(state): State<AppState>,
@@ -231,7 +232,8 @@ pub(crate) async fn chat(
                 responses: false,
             }),
     };
-    let mut won = acquire_attempt(&context, &mut guard).await;
+    let mut won =
+        acquire_guarded_attempt(&context, &mut guard, admission.guardrail_input_pending).await;
     adopt_outcome(&mut admission, &mut won);
     won = checkpoint_winner(
         state.capture.as_ref(),

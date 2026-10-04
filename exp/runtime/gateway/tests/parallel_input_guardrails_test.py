@@ -1,0 +1,339 @@
+"""Exercise parallel input inspection against real native sockets and ledger writes."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import socket
+import sqlite3
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+import exp_gateway_native
+import httpx
+import pytest
+
+from exp.common.core.artifacts import JsonObject
+from exp.common.models import BillingSource, GatewayTokenPrices, ModelCapabilities
+from exp.runtime.gateway.contracts import GatewayRequest
+from exp.runtime.gateway.guardrails.classifiers import ClassifierRegistry
+from exp.runtime.gateway.guardrails.client import DirectClassifierClient
+from exp.runtime.gateway.guardrails.contracts import (
+    ClassifierVerdict,
+    GuardrailAction,
+    GuardrailCapabilityKind,
+    GuardrailCheck,
+    GuardrailCheckStage,
+    GuardrailCompletion,
+    MandatoryGuardrailPolicy,
+)
+from exp.runtime.gateway.guardrails.enforcement import GuardrailEngine
+from exp.runtime.gateway.guardrails.store import MappingGuardrailStore
+from exp.runtime.gateway.lifecycle import load_gateway_components
+from exp.runtime.gateway.lifecycle_test import _configured_gateway
+from exp.runtime.gateway.native_bridge import NativeBridgeError, NativeControlPlane
+from exp.runtime.gateway.native_bridge_test import _admit, _chat_body
+from exp.runtime.gateway.native_server import serve_native_gateway
+from exp.runtime.gateway.tests.mandatory_guardrails_test import _tool_chunk
+from exp.runtime.gateway.tests.native_waterfall_test import (
+    _content_chunk,
+    _sse_frame,
+    _terminal_frames,
+)
+
+
+@pytest.mark.parametrize("outcome", ["allow", "block"])
+def test_customer_funded_admission_waits_for_input_approval(tmp_path: Path, outcome: str) -> None:
+    """BYOK cannot return a dispatchable admission while mandatory input is pending."""
+    classifier = _Classifier(outcome)
+    _, key = _configured_gateway(tmp_path, base_url="http://127.0.0.1:1/v1")
+    components = load_gateway_components(tmp_path, environment={"TEST_PROVIDER_KEY": "fixture"})
+    control = NativeControlPlane(components, guardrails=_engine(classifier))
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_admit, control, key, _chat_body())
+        try:
+            assert classifier.started.wait(2)
+            assert not future.done()
+            classifier.release.set()
+            if outcome == "block":
+                with pytest.raises(NativeBridgeError):
+                    future.result(timeout=2)
+            else:
+                admission = future.result(timeout=2)
+                assert admission["guardrail_input_pending"] is False
+                control.abandon(json.dumps({"request_id": admission["request_id"]}))
+        finally:
+            classifier.release.set()
+    with sqlite3.connect(components.ledger.database_path) as db:
+        assert db.execute("select count(*) from gateway_attempts").fetchone() == (0,)
+
+
+class _Classifier:
+    """Barrier-controlled input classifier with no output inspection capability."""
+
+    def __init__(self, outcome: str) -> None:
+        """Create one independent classifier and release latch."""
+        self.outcome = outcome
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.cancelled = threading.Event()
+        self.requests: list[GatewayRequest] = []
+
+    async def inspect_input(
+        self, *, request: GatewayRequest, check: GuardrailCheck
+    ) -> ClassifierVerdict:
+        """Wait independently of gateway bridge workers before returning a decision."""
+        self.requests.append(request)
+        self.started.set()
+        try:
+            while not self.release.is_set():
+                await asyncio.sleep(0.001)
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        if self.outcome == "error":
+            raise RuntimeError("private-detector-error-must-not-escape")
+        return ClassifierVerdict(flagged=self.outcome == "block")
+
+    async def inspect_output(
+        self, *, completion: GuardrailCompletion, check: GuardrailCheck
+    ) -> ClassifierVerdict:
+        """Reject accidental use of output moderation in this input-only policy."""
+        raise AssertionError("input-only policy called output inspection")
+
+
+def _engine(classifier: _Classifier, timeout_ms: int = 3000) -> GuardrailEngine:
+    """Compose parallel input inspection through the existing public engine seam."""
+    return GuardrailEngine(
+        store=MappingGuardrailStore(()),
+        client=DirectClassifierClient(ClassifierRegistry({"criminal": classifier})),
+        monotonic=time.monotonic,
+        mandatory_policy=MandatoryGuardrailPolicy(
+            policy_id="criminal-input",
+            revision="fixture-v1",
+            input_execution="parallel",
+            checks=(
+                GuardrailCheck(
+                    check_id="criminal",
+                    capability=GuardrailCapabilityKind.CONTENT_SAFETY,
+                    stage=GuardrailCheckStage.INPUT,
+                    action=GuardrailAction.BLOCK,
+                    adapter_id="criminal",
+                    timeout_ms=timeout_ms,
+                ),
+            ),
+        ),
+    )
+
+
+@pytest.mark.parametrize("surface", ["chat", "responses", "messages"])
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("outcome", ["allow", "block", "error", "timeout"])
+@pytest.mark.parametrize("tool_call", [False, True])
+@pytest.mark.parametrize("provider_phase", ["streaming", "not_open", "completed"])
+def test_parallel_inspection_holds_text_tools_and_customer_settlement(
+    tmp_path: Path,
+    surface: str,
+    streaming: bool,
+    outcome: str,
+    tool_call: bool,
+    provider_phase: str,
+) -> None:
+    """Provider starts before classification; no headers/content escape until approval."""
+    classifier = _Classifier(outcome)
+    provider_started = threading.Event()
+    provider_finish = threading.Event()
+    provider_finished = threading.Event()
+    headers_received = threading.Event()
+    content_received = threading.Event()
+    errors: list[Exception] = []
+    marker = "private-provider-content"
+
+    class Provider(BaseHTTPRequestHandler):
+        """Send an early semantic event, then wait for the test to finish generation."""
+
+        def do_POST(self) -> None:  # noqa: N802 - standard HTTP fixture protocol.
+            """Serve synthetic text or a function call with explicit provider usage."""
+            self.rfile.read(int(self.headers["Content-Length"]))
+            provider_started.set()
+            if provider_phase == "not_open":
+                provider_finish.wait(5)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            try:
+                frame = (
+                    _tool_chunk('{"q":"' + marker + '"}', start=True)
+                    if tool_call
+                    else _content_chunk(marker)
+                )
+                self.wfile.write(
+                    _sse_frame(
+                        {
+                            "choices": [],
+                            "usage": {
+                                "prompt_tokens": 80,
+                                "completion_tokens": 5,
+                                "total_tokens": 85,
+                            },
+                        }
+                    )
+                )
+                self.wfile.write(frame)
+                self.wfile.flush()
+                if provider_phase != "completed":
+                    provider_finish.wait(5)
+                terminal = _terminal_frames()
+                if tool_call:
+                    terminal = terminal.replace(
+                        b'"finish_reason":"stop"', b'"finish_reason":"tool_calls"'
+                    )
+                self.wfile.write(terminal)
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                provider_finished.set()
+
+        def log_message(self, format: str, *args: object) -> None:
+            """Keep provider fixture payloads out of test logs."""
+
+    provider = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+    provider_thread = threading.Thread(target=provider.serve_forever, daemon=True)
+    provider_thread.start()
+    _, key = _configured_gateway(
+        tmp_path,
+        base_url=f"http://127.0.0.1:{provider.server_port}/v1",
+        capabilities=ModelCapabilities(maximum_output_tokens=4096, supports_tools=True),
+        billing_source=BillingSource.HOST_MANAGED,
+        prices=GatewayTokenPrices(
+            input_nano_usd_per_million_tokens=1_000_000_000,
+            output_nano_usd_per_million_tokens=2_000_000_000,
+        ),
+    )
+    components = load_gateway_components(tmp_path, environment={"TEST_PROVIDER_KEY": "fixture"})
+
+    class Control(NativeControlPlane):
+        """Expose unexpected settlement callback failures to the test."""
+
+        def settle(self, argument: str) -> str:
+            """Record callback failures before the native retry boundary sanitizes them."""
+            try:
+                return super().settle(argument)
+            except Exception as exc:
+                errors.append(exc)
+                raise
+
+    control = Control(
+        components, guardrails=_engine(classifier, timeout_ms=750 if outcome == "timeout" else 3000)
+    )
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    ready = threading.Event()
+    stop = exp_gateway_native.shutdown_handle()
+
+    def serve() -> None:
+        """Run the actual extension and retain startup failures for the caller."""
+        try:
+            serve_native_gateway(
+                control,
+                host="127.0.0.1",
+                port=port,
+                shutdown=stop,
+                on_listening=ready.set,
+                graceful_timeout_seconds=0.1,
+            )
+        except Exception as exc:  # noqa: BLE001 - surface fixture failures.
+            errors.append(exc)
+            ready.set()
+
+    gateway_thread = threading.Thread(target=serve, daemon=True)
+    gateway_thread.start()
+    body: JsonObject = {"model": "coding", "stream": streaming}
+    if surface == "responses":
+        path = "/v1/responses"
+        body["input"] = "Synthetic moderation fixture."
+    else:
+        path = "/v1/messages" if surface == "messages" else "/v1/chat/completions"
+        body["max_tokens"] = 100
+        body["messages"] = [{"role": "user", "content": "Synthetic moderation fixture."}]
+    if tool_call:
+        schema: JsonObject = {"type": "object", "properties": {"q": {"type": "string"}}}
+        definition: JsonObject = {"name": "lookup", "parameters": schema}
+        body["tools"] = (
+            [{"name": "lookup", "input_schema": schema}]
+            if surface == "messages"
+            else [{"type": "function", **definition}]
+            if surface == "responses"
+            else [{"type": "function", "function": definition}]
+        )
+
+    def request() -> tuple[int, str]:
+        """Retain first-header and first-content arrival separately from completion."""
+        with httpx.stream(
+            "POST",
+            f"http://127.0.0.1:{port}{path}",
+            headers={"authorization": f"Bearer {key}"},
+            json=body,
+            timeout=8,
+        ) as response:
+            headers_received.set()
+            chunks: list[str] = []
+            for chunk in response.iter_text():
+                chunks.append(chunk)
+                if marker in "".join(chunks):
+                    content_received.set()
+            return response.status_code, "".join(chunks)
+
+    try:
+        assert ready.wait(5) and not errors
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(request)
+            try:
+                assert classifier.started.wait(2)
+                assert provider_started.wait(2), "generation waited for classification"
+                assert not headers_received.wait(0.05), "response escaped the pending input gate"
+                if outcome != "timeout":
+                    classifier.release.set()
+                if outcome == "allow":
+                    if streaming and not tool_call and provider_phase == "streaming":
+                        assert content_received.wait(2)
+                        assert not provider_finished.is_set(), "allow buffered the full response"
+                    provider_finish.set()
+                status, result = future.result(timeout=3)
+                assert status == (200 if outcome == "allow" else 400 if outcome == "block" else 503)
+                assert (marker in result) == (outcome == "allow")
+                assert "private-detector-error-must-not-escape" not in result
+            finally:
+                classifier.release.set()
+                provider_finish.set()
+        assert not errors
+        with sqlite3.connect(components.ledger.database_path) as db:
+            rows = db.execute(
+                "select state, failure_class, estimated_cost_nano_usd, budget_settled_nano_usd "
+                "from gateway_attempts"
+            ).fetchall()
+            requests = db.execute("select terminal_state from gateway_requests").fetchall()
+        assert len(rows) == 1
+        state, failure, provider_cost, customer_cost = rows[0]
+        assert state == ("completed" if outcome == "allow" else "failed")
+        assert requests == [(state,)]
+        assert customer_cost > 0 if outcome == "allow" else customer_cost == 0
+        if provider_phase != "not_open" or outcome == "allow":
+            assert provider_cost is not None and provider_cost > 0
+        else:
+            assert provider_cost is None  # No usage report, not fictitious zero provider cost.
+        assert failure is None if outcome == "allow" else failure in {"guardrail", "unavailable"}
+        assert len(classifier.requests) == 1
+    finally:
+        classifier.release.set()
+        provider_finish.set()
+        stop.request_shutdown()
+        gateway_thread.join(timeout=5)
+        provider.shutdown()
+        provider.server_close()
+        provider_thread.join(timeout=5)

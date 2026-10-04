@@ -44,7 +44,8 @@ per-check timeouts, request deadlines, decision metrics, and verdict actions.
 Default request and response inspection bounds are 1 MiB. Hosts may lower them;
 response inspection cannot exceed the native 1 MiB coverage bound.
 
-The engine inspects the authenticated, normalized input after continuation
+With the default `input_execution="before_dispatch"`, the engine inspects the
+normalized input after continuation
 expansion and before customer rewrites, ledger acceptance, route selection, or
 provider dispatch. It inspects customer rewrites again. Recovered plaintext
 reasoning, gateway search results, and loaded tool schemas are also checked before
@@ -93,7 +94,7 @@ safe-prefix cache. The engine hashes the entire mandatory configuration, includi
 `revision`, into keyed replay scope. Change `revision` whenever the detector or
 external rollout configuration changes; stale keyed replays then conflict.
 
-Startup requires the compiled `GUARDRAIL_INSPECTION_CONTRACT_VERSION=1` marker.
+Startup requires the compiled `GUARDRAIL_INSPECTION_CONTRACT_VERSION=2` marker.
 Publish coordinated engine and native releases before a downstream host updates
 its exact PyPI pins. Coverage includes native Chat Completions, Responses
 (including WebSocket admission), and Messages. Separate image, embedding, batch,
@@ -112,6 +113,42 @@ failover. Admission with mandatory checks suppresses the zero-work capacity retr
 certificate because classifier calls may perform paid I/O. Hosts must verify their
 own billing policy. This integration supplies enforcement machinery; it does not
 itself supply a hosted detector, model-quality validation, or production rollout.
+
+### Concurrent input inspection
+
+For an input-only mandatory policy, set `input_execution="parallel"` and include
+only checks with `stage="input"`. The engine rejects a parallel policy containing
+output checks. Customer input checks and privacy rewrites still finish before
+dispatch. The mandatory checks inspect each distinct original request, rewritten
+request, and expanded continuation, including recovered plaintext reasoning. They
+use the same bounded classifier executor and request deadline as serial checks.
+
+After admission, classification overlaps model generation on host-managed routes.
+Native Chat, Responses, and Messages withhold the response until approval,
+including text, reasoning, tool-call events, replay publication, and continuation
+retention. Approval releases the pending prefix and resumes ordinary streaming;
+it does not wait for the whole completion. This mode performs no mandatory output
+classification and has no 256-byte output-inspection threshold. Customer output
+checks still apply when configured. Client function declarations do not execute
+tools inside the provider and may overlap; their generated calls remain withheld.
+
+An input block, classifier error, or timeout cancels the upstream request and
+discards its response. The customer budget settlement is zero. Available provider
+usage remains recorded, with incomplete usage marked estimated or unknown under
+the existing disconnect accounting contract. Hosts must honor the trusted
+`input_guardrail_denied` failure detail to release customer holds while retaining
+provider cost evidence. Cancellation cannot undo provider work already performed.
+
+Provider-native tools, provider-server tools, gateway web or tool search, explicit
+cache operations, service-tier requests, and routes containing customer-managed
+credentials wait for approval before dispatch. This avoids unapproved remote
+actions or provider charges outside the platform's billing control. A customer
+cannot select the execution mode or forge the trusted settlement detail.
+
+When provider first-token latency exceeds classifier latency, overlap can hide
+most of the input-inspection delay. Otherwise the response waits for the classifier.
+Measure both distributions with the actual detector and workload; local scripted
+classifiers establish ordering and gateway overhead, not GPU inference latency.
 
 ## Customer identity policies
 

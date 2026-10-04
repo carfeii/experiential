@@ -306,7 +306,7 @@ class NativeAttemptAccounting:
             self._inflight[entry.authorization.request_id] = entry
 
     def entry(self, request_id: str) -> InflightRequest | None:
-        """Return one tracked request, or ``None`` after settlement."""
+        """Return one live request, or None after settlement."""
         with self._lock:
             return self._inflight.get(request_id)
 
@@ -757,6 +757,8 @@ class NativeAttemptAccounting:
             if entry.pending_abandon is None:
                 entry.pending_abandon = failure
             failure = entry.pending_abandon
+        if entry.input_guardrail_gate is not None:
+            failure = entry.input_guardrail_gate.settlement_failure() or failure
         if not entry.execution_lock.acquire(blocking=False):
             return "{}"
         try:
@@ -786,6 +788,8 @@ class NativeAttemptAccounting:
                 raise authority_error(exc) from exc
             with self._lock:
                 self._inflight.pop(request_id, None)
+            if entry.input_guardrail_gate is not None:
+                entry.input_guardrail_gate.cancel()
             return "{}"
         finally:
             entry.execution_lock.release()
@@ -820,11 +824,7 @@ class NativeAttemptAccounting:
     ) -> None:
         """Apply one settled attempt's outcome to the deployment circuits.
 
-        Mirrors the executor's recording order: a successful dispatch opening
-        restores admission first, then the terminal outcome either closes the
-        circuit or counts against it. A plan rung whose response reports a used-up
-        usage window is throttled until that window resets, success or not, so a
-        pool of plans rotates before the first 429.
+        Restore successful opens; exhausted provider windows throttle until reset.
 
         Args:
             entry: The owning in-flight request.

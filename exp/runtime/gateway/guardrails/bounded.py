@@ -724,6 +724,18 @@ class _NativeCallbackRunner:
 _NATIVE_RUNNER = _NativeCallbackRunner()
 
 
+def start_on_native_loop[T](coro: Coroutine[object, object, T]) -> Future[T]:
+    """Start bounded engine work without occupying a native bridge worker.
+
+    Args:
+        coro: Engine coroutine whose classifier calls use BoundedInspect.
+
+    Returns:
+        Request-owned future. Its owner cancels it when the request terminates.
+    """
+    return asyncio.run_coroutine_threadsafe(coro, _NATIVE_RUNNER.loop())
+
+
 def run_on_native_loop[T](coro: Coroutine[object, object, T]) -> T:
     """Submit one coroutine to the shared native-callback event loop.
 

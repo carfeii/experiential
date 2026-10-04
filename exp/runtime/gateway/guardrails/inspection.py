@@ -151,9 +151,9 @@ def validate_guardrail_engine(engine: GuardrailEngine | None) -> None:
         return
     native = importlib.import_module("exp_gateway_native")
     contract = getattr(native, "GUARDRAIL_INSPECTION_CONTRACT_VERSION", None)
-    if type(contract) is not int or contract != 1:
+    if type(contract) is not int or contract != 2:
         raise ValueError(
-            "mandatory guardrails require native GUARDRAIL_INSPECTION_CONTRACT_VERSION=1; "
+            "mandatory guardrails require native GUARDRAIL_INSPECTION_CONTRACT_VERSION=2; "
             "install the coordinated guardrail-capable native package before enabling them"
         )
 

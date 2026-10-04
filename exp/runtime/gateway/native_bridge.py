@@ -1,16 +1,6 @@
-"""Python control plane for the native (Rust) gateway data plane.
+"""JSON control plane for native sockets, streaming, and normalization.
 
-Rust owns sockets, streaming and normalization. Python owns authorization,
-payloads, continuations and ledger transactions. Boundaries use JSON.
-Admission returns the certified route without starting an attempt; Rust reserves
-each dispatch through ``start_attempt`` and records its durable terminal through
-``settle``. Candidate selection, health circuits and budget skipping stay here.
-Boundary errors raise :class:`NativeBridgeError`, whose ``public_error_json``
-attribute carries the sanitized OpenAI-shaped error returned to the caller.
-Requests the native path cannot serve (clients without a wire profile) return
-with an ``{"escalate": reason}`` admission disposition after the accepted
-request is finalized content-free; the data plane classifies the reason for
-metrics and fails the request closed with the shared internal error.
+Python owns authorization and accounting; unservable routes fail closed.
 """
 
 from __future__ import annotations
@@ -37,6 +27,7 @@ from exp.runtime.gateway.guardrails import deterministic
 from exp.runtime.gateway.guardrails.client import assert_not_internal_classification
 from exp.runtime.gateway.guardrails.contracts import GuardrailRejected
 from exp.runtime.gateway.guardrails.enforcement import GuardrailEngine
+from exp.runtime.gateway.guardrails.input_gate import can_overlap_input
 from exp.runtime.gateway.guardrails.inspection import (
     validate_guardrail_engine,
 )
@@ -216,15 +207,12 @@ class NativeControlPlane(
                 ``exp_gateway_native.metrics_snapshot_json``; otherwise reports ``None``.
             continuation_store: Optional injected Responses continuation
                 state; a host supplies its own bounded namespaced history,
-                and the default is one in-process bounded store.
+                defaulting to an in-process bounded store.
             readiness_probe: Optional hosted lifecycle readiness callback.
             usage_reporter: Optional hosted usage report callback.
             budget_error_factory: Optional hosted mapping for a rejected reservation.
-            cache_sample_gate: Optional hosted predicate deciding whether one
-                settled attempt (by its ledger attempt id) may feed the
-                cache-priority EWMA; the host excludes promo-funded attempts
-                so subsidized replay cannot buy fair-share weight. ``None``
-                admits every sample; a raising gate skips the sample.
+            cache_sample_gate: Host predicate admitting settled attempts to the cache EWMA.
+                None admits all; exceptions skip. Hosts exclude promo-funded attempts.
             native_route_eligible: Optional hosted policy for complete native semantics.
             guardrails: Shared mandatory and identity policy engine. ``None`` skips both.
             capture: Optional identity-scoped native capture controller.
@@ -380,6 +368,8 @@ class NativeControlPlane(
             )
             raise NativeBridgeError(error) from exc
 
+        original_guardrail_request = request
+        parallel_guardrail = can_overlap_input(self._guardrails, request)
         try:
             request, policy, guardrail_inspection = inspect_native_input(
                 self._guardrails,
@@ -387,6 +377,7 @@ class NativeControlPlane(
                 request=request,
                 deadline_monotonic=deadline,
                 detectors=self._guardrail_detectors,
+                defer_mandatory=parallel_guardrail,
             )
         except GuardrailRejected as exc:
             raise NativeBridgeError(public_failure_error(exc.failure)) from None
@@ -424,7 +415,7 @@ class NativeControlPlane(
             )
         pinned_reasoning_route = verified_reasoning_route
         request = strip_stale_reasoning_history(request)
-        if request != captured_request:
+        if request != captured_request and not parallel_guardrail:
             guardrail_inspection = self.reopen_guardrail_inspection(
                 authorization, request, deadline
             )
@@ -725,6 +716,14 @@ class NativeControlPlane(
             self._accounting.finish_request_quietly(authorization, failure)
             raise error from exc
 
+        input_gate = self.prepare_parallel_input(
+            authorization,
+            route,
+            (original_guardrail_request, captured_request, request, public_request),
+            deadline,
+            parallel=parallel_guardrail,
+            has_cache=cache_state is not None,
+        )
         plan = deterministic.native_output_plan(policy, self._guardrail_detectors)
         self._accounting.register(
             InflightRequest(
@@ -739,6 +738,7 @@ class NativeControlPlane(
                 ),
                 policy=policy,
                 guardrail_inspection=guardrail_inspection,
+                input_guardrail_gate=input_gate,
                 signers=tuple(signers),
                 dispatch_bindings=tuple(dispatch_bindings),
                 reasoning_carrier_authorities=tuple(carrier_authorities),
@@ -786,6 +786,7 @@ class NativeControlPlane(
             **attempt_policy(request.gateway).model_dump(mode="json"),
             "refusal_failover": authorization.refusal_failover,
             "guardrail_inspection": guardrail_inspection is not None,
+            "guardrail_input_pending": input_gate is not None,
             "output_guardrail": native_output_mode(
                 self._guardrails,
                 policy,

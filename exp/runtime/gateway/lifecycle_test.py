@@ -1100,6 +1100,8 @@ def _configured_gateway(
     provider: str = "openai-compatible",
     api_version: str | None = None,
     provider_model: str = "provider-model-exact",
+    billing_source: BillingSource = BillingSource.CUSTOMER_MANAGED,
+    prices: GatewayTokenPrices | None = None,
 ) -> tuple[GatewayManagement, str]:
     """Create one explicit direct alias, identity, grant, and key in real SQLite."""
     manager = GatewayManagement(root)
@@ -1129,7 +1131,8 @@ def _configured_gateway(
             supports_streaming=True,
             supports_streaming_tool_arguments=True,
         ),
-        prices=GatewayTokenPrices(),
+        prices=prices or GatewayTokenPrices(),
+        billing_source=billing_source,
         pricing_source=None,
         replace=False,
     )

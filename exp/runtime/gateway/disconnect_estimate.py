@@ -18,6 +18,7 @@ from exp.common.core.artifacts import JsonObject
 from exp.runtime.gateway.attempt_tokens import counted_input_tokens
 from exp.runtime.gateway.contracts import GatewayApiSurface, GatewayFailure, GatewayRequest
 from exp.runtime.gateway.embeddings_contracts import ServingRequest
+from exp.runtime.gateway.guardrails.input_gate import settle_input_gate
 from exp.runtime.gateway.native_execution import rung_load_key
 from exp.runtime.gateway.native_settlement import (
     StreamedOutput,
@@ -84,7 +85,7 @@ def settled_terminal(
                 )
             }
         )
-    return terminal, failure
+    return settle_input_gate(entry.input_guardrail_gate, terminal, failure)
 
 
 def _frozen_cached_fraction(

@@ -69,6 +69,9 @@ pub(crate) struct Admission {
     /// Host policy applies independently of every customer identity policy.
     #[serde(default)]
     pub guardrail_inspection: bool,
+    /// Generation may start before input classification, but no output can be released.
+    #[serde(default)]
+    pub guardrail_input_pending: bool,
     /// The resolved output chain when every check binds a deterministic
     /// detector. The data plane enforces it in place, so the request pays no
     /// python callback. A chain with any non-deterministic adapter omits the

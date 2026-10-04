@@ -4,6 +4,7 @@
 //! paths. The Anthropic protocol defines no idempotency header, so this
 //! surface never joins the keyed replay stores, matching the python engine.
 
+use crate::guardrails::input::acquire_guarded_attempt;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -42,8 +43,8 @@ use crate::tool_search::{
     disclose_after_collection,
 };
 use crate::waterfall::{
-    acquire_attempt, billed_empty_completion, unreported_empty_completion, CommittedAttempt,
-    Served, SettledAttempt, WaterfallContext, Won,
+    billed_empty_completion, unreported_empty_completion, CommittedAttempt, Served, SettledAttempt,
+    WaterfallContext, Won,
 };
 
 /// Anthropic-enveloped variant of `error_response` for the Messages surface,
@@ -235,7 +236,8 @@ pub(crate) async fn messages(
                 responses: false,
             }),
     };
-    let mut won = acquire_attempt(&context, &mut guard).await;
+    let mut won =
+        acquire_guarded_attempt(&context, &mut guard, admission.guardrail_input_pending).await;
     adopt_outcome(&mut admission, &mut won);
     won = checkpoint_winner(
         state.capture.as_ref(),

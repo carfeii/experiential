@@ -9,6 +9,7 @@
 //! This module never logs request text, completions, or replacements.
 
 pub mod detector;
+pub(crate) mod input;
 pub(crate) mod inspection;
 pub mod plan;
 mod syntax;

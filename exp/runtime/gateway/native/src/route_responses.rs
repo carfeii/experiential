@@ -3,6 +3,7 @@
 //! plane's `remember`, and the Responses-shaped settled, aggregated, guarded,
 //! and live-streaming response paths.
 
+use crate::guardrails::input::acquire_guarded_attempt;
 use std::sync::atomic::Ordering;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -42,7 +43,7 @@ use crate::tool_search::{
     adopt_outcome, completed_responses_body_for, configure_responses_encoder,
     disclose_after_collection, encode_responses_sse,
 };
-use crate::waterfall::{acquire_attempt, CommittedAttempt, SettledAttempt, WaterfallContext, Won};
+use crate::waterfall::{CommittedAttempt, SettledAttempt, WaterfallContext, Won};
 
 pub(crate) async fn responses(
     State(state): State<AppState>,
@@ -238,7 +239,8 @@ pub(crate) async fn responses(
                 responses: true,
             }),
     };
-    let mut won = acquire_attempt(&context, &mut guard).await;
+    let mut won =
+        acquire_guarded_attempt(&context, &mut guard, admission.guardrail_input_pending).await;
     adopt_outcome(&mut admission, &mut won);
     won = checkpoint_winner(
         state.capture.as_ref(),
