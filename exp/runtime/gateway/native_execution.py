@@ -1,13 +1,9 @@
 """Waterfall policy, wire building, and in-flight state for the native data plane.
 
-The native (Rust) engine executes the certified deployment waterfall itself,
-but every policy decision stays here: the ordered wire route is resolved and
-built per deployment at admission, each physical dispatch is reserved through
-``start_attempt`` immediately before network work, and candidate selection
-enforces the frozen waterfall semantics (attempt caps, per-failure retry and
-failover eligibility, deployment health circuits with bounded last-resort and
-forced claims, and per-deployment budget skipping). The bridge module owns the
-boundary encoding; this module owns the frozen semantics.
+The native engine executes the certified waterfall. This module resolves wire
+routes at admission and reserves dispatch through ``start_attempt`` before I/O.
+It owns frozen attempt caps, retry eligibility, health circuits, forced claims,
+and deployment budgets. The bridge module owns boundary encoding.
 """
 
 from __future__ import annotations
