@@ -208,7 +208,7 @@ def test_native_input_runs_the_async_chain_on_a_private_loop() -> None:
         engine,
         authorization=_authorization(),
         request=request,
-        deadline_monotonic=200.0,
+        deadline_monotonic=time.monotonic() + 10,
     )
 
     assert policy is not None
