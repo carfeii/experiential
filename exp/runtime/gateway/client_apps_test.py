@@ -26,6 +26,10 @@ from exp.runtime.gateway.client_apps import (
         ("codex_cli_rs/0.151.0 (Mac OS 15.5.0; arm64) iTerm.app/3.5.14", ClientApp.CODEX),
         ("Codex Desktop/0.155.0-alpha.9.2 (Windows 10.0.26200; x86_64)", ClientApp.CODEX),
         ("Codex", ClientApp.CODEX),
+        (
+            "codex-tui/0.156.1 (Windows 10.0.26200; x86_64) WindowsTerminal (codex-tui; 0.156.1)",
+            ClientApp.CODEX,
+        ),
         ("opencode/1.18.33 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14", ClientApp.OPENCODE),
         ("opencode/latest/2.0.18/desktop", ClientApp.OPENCODE),
         ("Kilo-Code/7.5.16 ai-sdk/provider-utils/4.0.27 runtime/bun/1.3.14", ClientApp.KILO_CODE),
@@ -82,7 +86,13 @@ def test_known_user_agents_classify(user_agent: str, expected: ClientApp) -> Non
             "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
             ClientApp.BROWSER,
         ),
+        ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0 Safari/537.36", ClientApp.BROWSER),
         ("curl/8.7.1", ClientApp.CURL),
+        ("node-fetch", ClientApp.CUSTOM_CODE),
+        (
+            "Mozilla/5.0 (Windows NT; Windows NT 10.0; en-US) WindowsPowerShell/5.1.19041.6456",
+            ClientApp.CUSTOM_CODE,
+        ),
         ("node", ClientApp.CUSTOM_CODE),
         ("undici", ClientApp.CUSTOM_CODE),
         ("Bun/1.4.2", ClientApp.CUSTOM_CODE),
@@ -117,6 +127,7 @@ def test_sdks_and_http_libraries_name_the_caller_kind(user_agent: str, expected:
         "pilot/1.0",
         "nodemon-proxy/1.0",
         "Mozilla/5.0 (compatible; ChatClient/1.0)",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_8) LightRAG/0328",
     ],
 )
 def test_unrecognized_clients_stay_unclassified(user_agent: str | None) -> None:

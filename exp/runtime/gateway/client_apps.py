@@ -104,7 +104,7 @@ CLIENT_APP_LABELS: dict[ClientApp, str] = {
 _USER_AGENT_RULES: tuple[tuple[ClientApp, re.Pattern[str]], ...] = (
     (ClientApp.HERMES, re.compile(r"hermes[-_ ]?agent/|\(hermes gateway\)")),
     (ClientApp.CLAUDE_CODE, re.compile(r"^claude-(?:cli|code)/")),
-    (ClientApp.CODEX, re.compile(r"^codex(?:_[a-z_]+)?/|^codex desktop/|^codex$")),
+    (ClientApp.CODEX, re.compile(r"^codex(?:_[a-z_]+|-tui)?/|^codex desktop/|^codex$")),
     (ClientApp.OPENCODE, re.compile(r"^opencode/")),
     (ClientApp.KILO_CODE, re.compile(r"^kilo-?code/")),
     (ClientApp.CLINE, re.compile(r"^cline/")),
@@ -133,15 +133,18 @@ _CALLER_KIND_RULES: tuple[tuple[ClientApp, re.Pattern[str]], ...] = (
     (ClientApp.OPENAI_SDK, re.compile(r"^(?:async)?openai(?:client\w*)?/")),
     (ClientApp.ANTHROPIC_SDK, re.compile(r"^(?:async)?anthropic/")),
     (ClientApp.VERCEL_AI_SDK, re.compile(r"\bai-sdk/")),
-    (ClientApp.BROWSER, re.compile(r"^mozilla/5\.0 \(.*\) (?:applewebkit|gecko)/")),
+    (
+        ClientApp.BROWSER,
+        re.compile(r"^mozilla/5\.0 \([^)]*\) (?:applewebkit|gecko|chrome|firefox|safari)/"),
+    ),
     (ClientApp.CURL, re.compile(r"^curl/")),
     (
         ClientApp.CUSTOM_CODE,
         re.compile(
-            r"^(?:node(?:$|/)|undici\b|node-fetch/|bun/|deno/|go-http-client/|python-urllib/"
+            r"^(?:node(?:$|/)|undici\b|node-fetch\b|bun/|deno/|go-http-client/|python-urllib/"
             r"|python-httpx/|python-requests/|python/[\d.]+ aiohttp/|aiohttp/|axios/|okhttp/"
             r"|guzzlehttp/|fasthttp$|java/|dart/|reqwest/|ruby$|faraday |mozilla/5\.0$)"
-            r"|\bpowershell/"
+            r"|\b(?:windows)?powershell/"
         ),
     ),
 )
