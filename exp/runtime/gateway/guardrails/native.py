@@ -24,6 +24,7 @@ from exp.runtime.gateway.guardrails.deterministic import NativeDetector, native_
 from exp.runtime.gateway.guardrails.enforcement import GuardrailEngine
 from exp.runtime.gateway.guardrails.input_gate import (
     InputGuardrailGate,
+    denied_input_failure,
     gate_status,
     start_input_gate,
 )
@@ -427,8 +428,9 @@ class NativeGuardrailsMixin:
         try:
             gate.future.result(timeout=max(0, deadline - time.monotonic()))
         except Exception:  # noqa: BLE001 - preserve only the sanitized engine failure.
-            failure = gate.settlement_failure()
-            assert failure is not None
+            # A late allow may race the blocking wait's deadline. The wait
+            # still failed, so terminalize admission rather than orphaning it.
+            failure = gate.settlement_failure() or denied_input_failure()
             gate.cancel()
             self._accounting.finish_request_quietly(authorization, failure)
             raise NativeBridgeError(public_failure_error(failure)) from None

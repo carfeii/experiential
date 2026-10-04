@@ -8,9 +8,10 @@ import socket
 import sqlite3
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import Mock
 
 import exp_gateway_native
 import httpx
@@ -19,6 +20,7 @@ import pytest
 from exp.common.core.artifacts import JsonObject
 from exp.common.models import BillingSource, GatewayTokenPrices, ModelCapabilities
 from exp.runtime.gateway.contracts import GatewayRequest
+from exp.runtime.gateway.guardrails import native as native_guardrails
 from exp.runtime.gateway.guardrails.classifiers import ClassifierRegistry
 from exp.runtime.gateway.guardrails.client import DirectClassifierClient
 from exp.runtime.gateway.guardrails.contracts import (
@@ -31,6 +33,7 @@ from exp.runtime.gateway.guardrails.contracts import (
     MandatoryGuardrailPolicy,
 )
 from exp.runtime.gateway.guardrails.enforcement import GuardrailEngine
+from exp.runtime.gateway.guardrails.input_gate import InputGuardrailGate
 from exp.runtime.gateway.guardrails.store import MappingGuardrailStore
 from exp.runtime.gateway.lifecycle import load_gateway_components
 from exp.runtime.gateway.lifecycle_test import _configured_gateway
@@ -68,6 +71,25 @@ def test_customer_funded_admission_waits_for_input_approval(tmp_path: Path, outc
         finally:
             classifier.release.set()
     with sqlite3.connect(components.ledger.database_path) as db:
+        assert db.execute("select count(*) from gateway_attempts").fetchone() == (0,)
+
+
+def test_customer_funded_deadline_race_terminalizes_accepted_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A classifier that allows just after the admission wait expires cannot orphan the ledger."""
+    result: Future[None] = Future()
+    result.set_result(None)
+    monkeypatch.setattr(result, "result", Mock(side_effect=[TimeoutError(), None]))
+    gate = InputGuardrailGate(result, time.monotonic() + 3)
+    monkeypatch.setattr(native_guardrails, "start_input_gate", Mock(return_value=gate))
+    _, key = _configured_gateway(tmp_path, base_url="http://127.0.0.1:1/v1")
+    components = load_gateway_components(tmp_path, environment={"TEST_PROVIDER_KEY": "fixture"})
+    control = NativeControlPlane(components, guardrails=_engine(_Classifier("allow")))
+    with pytest.raises(NativeBridgeError):
+        _admit(control, key, _chat_body())
+    with sqlite3.connect(components.ledger.database_path) as db:
+        assert db.execute("select terminal_state from gateway_requests").fetchall() == [("failed",)]
         assert db.execute("select count(*) from gateway_attempts").fetchone() == (0,)
 
 
