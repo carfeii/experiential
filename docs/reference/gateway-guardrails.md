@@ -61,11 +61,12 @@ no input check to modify the request. Any privacy rewrite keeps the combined inp
 chain before dispatch. The execution mode never adds an output check: the example
 above only classifies the prompt.
 
-Host-managed generation may start while approval is pending. Native Chat, Responses,
-and Messages hold all response content until approval, including reasoning and client
-function calls. Replay publication and continuation retention also wait. Approval
-releases the pending prefix and resumes normal streaming, without waiting for full
-completion. Function declarations supplied by clients do not execute remote tools.
+Host-managed generation on direct aliases may start while approval is pending.
+Native Chat, Responses, and Messages hold all response content until approval,
+including reasoning and client function calls. Replay publication and continuation
+retention also wait. Approval releases the pending prefix and resumes normal
+streaming, without waiting for full completion. Function declarations supplied by
+clients do not execute remote tools.
 
 A block, classifier error, or timeout cancels the provider request and discards its
 response. The trusted `input_guardrail_denied` settlement detail requires zero
@@ -77,6 +78,11 @@ Provider-native or provider-server tools, gateway web or tool search, explicit c
 operations, service tiers, and routes with customer-managed credentials require
 approval before dispatch. These are execution constraints of the same session.
 Customers cannot choose the operator policy's mode or forge its settlement detail.
+
+Project aliases complete input inspection before learned routing. Selection may
+send the initial user message to a separately billed embedding provider, so it
+cannot overlap pending approval. Responses continuations retain their selection
+episode and inspect expanded history before routing.
 
 When provider first-token latency exceeds classifier latency, overlap can hide most
 of the inspection delay. Otherwise the first response content waits for the check.

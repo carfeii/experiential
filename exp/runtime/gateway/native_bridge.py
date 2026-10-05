@@ -369,7 +369,9 @@ class NativeControlPlane(
         )
         if guardrails is not None:
             guardrails.detectors = self._guardrail_detectors
-        parallel_guardrail = guardrails is not None and guardrails.can_overlap_input(request)
+        parallel_guardrail = isinstance(authorization.target, DirectTarget) and (
+            guardrails is not None and guardrails.can_overlap_input(request)
+        )
         try:
             if guardrails is not None:
                 request = guardrails.inspect_input(request, defer=parallel_guardrail)
