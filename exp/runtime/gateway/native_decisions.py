@@ -14,6 +14,7 @@ from typing import Protocol
 
 from exp.common.core.artifacts import JsonObject
 from exp.common.models.catalog import GatewayTokenPrices
+from exp.runtime.gateway.client_apps import with_client_identity
 from exp.runtime.gateway.contracts import (
     AuthorizationSnapshot,
     DirectTarget,
@@ -22,7 +23,6 @@ from exp.runtime.gateway.contracts import (
 )
 from exp.runtime.gateway.decisions_contracts import DecisionRequest, decode_decision_request
 from exp.runtime.gateway.guardrails.client import assert_not_internal_classification
-from exp.runtime.gateway.client_apps import with_client_identity
 from exp.runtime.gateway.model_chain_authority import authorize_serving_model_chains
 from exp.runtime.gateway.native_accounting import (
     NativeAttemptAccounting,
