@@ -97,9 +97,11 @@ output and any rewrite before release. A text rewrite suppresses alternate outpu
 channels, and replacing a typed refusal converts its refusal terminal to completion.
 Other provider failures remain failures. Tool arguments are inspected but cannot be rewritten. Generated
 gateway-owned tool calls are checked before execution. Gateway-generated metadata
-and terminal responses are checked while the same accounting entry still owns the
-session; a requested metadata rewrite fails closed because protocol encoders cannot
-apply it safely.
+and the provider answer are inspected together as one completion, with one combined
+response-size limit. Output policies buffer requests with gateway web or tool search,
+including deterministic redactors. Terminal responses are checked while the same
+accounting entry still owns the session. A rewrite that would change or remove generated
+metadata fails closed because protocol encoders cannot apply it safely.
 
 ## Failure, replay, and integration
 
@@ -369,6 +371,7 @@ individual checks by check ID (`standard-input-pii`) or `stage.capability`
       "identity_id": "identity-one",
       "protected": true,
       "preset": "standard",
+      "revision": "detector-rollout-v1",
       "timeout_ms": 250,
       "capability_adapters": {
         "pii": "hosted-pii",

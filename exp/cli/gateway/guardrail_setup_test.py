@@ -404,6 +404,29 @@ def test_non_owned_standard_looking_policy_is_custom(tmp_path: Path) -> None:
     assert policy.policy_id == "hand-authored-standard"
 
 
+def test_authored_revision_preserves_custom_standard_policy(tmp_path: Path) -> None:
+    """Setup must preserve an operator's rollout revision on an otherwise owned pack."""
+    apply_setup_guardrails(tmp_path, _plan())
+    path = guardrail_config_path(tmp_path)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["policies"][0]["revision"] = "detector-v2"
+    path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    before = path.read_bytes()
+
+    inspection = inspect_setup_guardrails(tmp_path, _ORG, _IDENTITY)
+    assert inspection.mode is GuardrailSetupMode.CUSTOM
+    assert inspection.display == GUARDRAILS_CUSTOM
+    with pytest.raises(ValueError, match="custom/preserved"):
+        apply_setup_guardrails(tmp_path, _plan())
+    with guardrail_setup_compensation(tmp_path, None):
+        assert path.read_bytes() == before
+
+    assert path.read_bytes() == before
+    engine = load_guardrail_engine(tmp_path)
+    assert engine is not None
+    assert engine.policies_for(_ORG, _IDENTITY)[0].revision == "detector-v2"
+
+
 def test_collect_rejects_ambiguous_custom_answers(tmp_path: Path) -> None:
     """Custom policies require an explicit keep or replace; other words fail closed."""
     _write_document(tmp_path, _custom_document())

@@ -221,6 +221,36 @@ def test_standard_preset_file_round_trip(tmp_path: Path) -> None:
     assert len(policy.checks) == 7
 
 
+def test_standard_preset_revision_invalidates_replay_after_reload(tmp_path: Path) -> None:
+    """Changing a hosted detector rollout token invalidates its frozen replay identity."""
+    document = _standard_document()
+    policies = document["policies"]
+    assert isinstance(policies, list)
+    authored = policies[0]
+    assert isinstance(authored, dict)
+    authored["revision"] = "detector-v1"
+    path = tmp_path / "gateway"
+    path.mkdir()
+    config_path = path / "guardrails.json"
+    config_path.write_text(json.dumps(document), encoding="utf-8")
+    original = load_guardrail_engine(tmp_path)
+    assert original is not None
+    original_policies = original.policies_for("organization-one", "identity-one")
+
+    authored["revision"] = "detector-v2"
+    config_path.write_text(json.dumps(document), encoding="utf-8")
+    reloaded = load_guardrail_engine(tmp_path)
+    assert reloaded is not None
+    reloaded_policies = reloaded.policies_for("organization-one", "identity-one")
+
+    assert original_policies[0].revision == "detector-v1"
+    assert reloaded_policies[0].revision == "detector-v2"
+    assert original_policies[0].checks == reloaded_policies[0].checks
+    assert original.policy_revision(original_policies) != reloaded.policy_revision(
+        reloaded_policies
+    )
+
+
 def test_protected_standard_preset_blocks_flagged_prompt_injection() -> None:
     """A hosted injection verdict blocks a protected identity end to end."""
 

@@ -12,6 +12,21 @@ pub struct OutputGuardrailContext<'a> {
     pub responses: bool,
 }
 
+impl OutputGuardrailContext<'_> {
+    /// Project generated content into the same subject as the provider's answer.
+    pub(crate) fn events(&self, request_id: &str, rounds: &[ToolSearchRound]) -> Vec<Event> {
+        let mut events = self.web_search.map_or_else(Vec::new, |search| {
+            web_search_prelude_events(search, request_id)
+        });
+        events.extend(if self.responses {
+            responses_prelude_events(rounds, request_id)
+        } else {
+            messages_prelude_events(rounds, request_id)
+        });
+        events
+    }
+}
+
 /// Inspect content while accounting still owns its request session.
 /// Rewrites of generated metadata cannot be applied by protocol encoders, so fail closed.
 pub(super) async fn inspect_outward(
@@ -22,14 +37,7 @@ pub(super) async fn inspect_outward(
     let Some(output) = &ctx.output_guardrails else {
         return Ok(());
     };
-    let mut events = output.web_search.map_or_else(Vec::new, |search| {
-        web_search_prelude_events(search, ctx.request_id)
-    });
-    events.extend(if output.responses {
-        responses_prelude_events(rounds, ctx.request_id)
-    } else {
-        messages_prelude_events(rounds, ctx.request_id)
-    });
+    let mut events = output.events(ctx.request_id, rounds);
     events.extend_from_slice(tail);
     if events.is_empty() {
         return Ok(());

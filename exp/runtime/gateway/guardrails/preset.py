@@ -94,11 +94,27 @@ _STAGE_CAPABILITY_TO_CHECK_ID: Final[dict[tuple[str, str], str]] = {
 
 
 class AuthoredStandardPolicy(ContractModel):
-    """Identity policy that opts into the documented standard pack."""
+    """Identity policy that opts into the documented standard pack.
+
+    Attributes:
+        policy_id: Unique operator-authored policy identity.
+        organization_id: Organization that owns the identity assignment.
+        identity_id: Identity within the organization that receives the pack.
+        revision: Detector rollout identity, 1 to 256 characters and default configured.
+            Change it when detector behavior or external rollout configuration changes.
+        protected: Required explicit choice of fail-closed or fail-open inspection.
+        preset: Explicit preset name, which must be standard.
+        timeout_ms: Default check deadline, 250 ms within the 1 to 30,000 ms range.
+        timeouts: Per-check or stage.capability deadline overrides, empty by default.
+        capability_adapters: Required registered adapter identity for every capability.
+        max_request_bytes: Input inspection bound, default 1 MiB and maximum 64 MiB.
+        max_response_bytes: Output inspection bound, default 1 MiB and maximum 64 MiB.
+    """
 
     policy_id: ArtifactId
     organization_id: OrganizationId
     identity_id: IdentityId
+    revision: str = Field(default="configured", min_length=1, max_length=256)
     protected: bool
     preset: str
     timeout_ms: int = Field(default=STANDARD_DEFAULT_TIMEOUT_MS, ge=1, le=30_000)
@@ -207,6 +223,7 @@ def _expand_standard(item: Mapping[str, object], adapter_ids: frozenset[str]) ->
         policy_id=authored.policy_id,
         organization_id=authored.organization_id,
         identity_id=authored.identity_id,
+        revision=authored.revision,
         protected=authored.protected,
         checks=checks,
         max_request_bytes=authored.max_request_bytes,

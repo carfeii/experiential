@@ -385,22 +385,6 @@ pub async fn acquire_attempt(ctx: &WaterfallContext<'_>, guard: &mut AttemptGuar
                 // semantic chunk, so an aggregator's upstream label (if any)
                 // is known here; settle it with whatever outcome follows.
                 guard.record_upstream_provider(committed.relay.upstream_provider());
-                if let Err(failure) = inspect_outward(ctx, &tool_search_rounds, &[]).await {
-                    committed.relay.close_transport();
-                    if !guard
-                        .settle(
-                            "failed",
-                            committed.usage.as_ref(),
-                            &committed.tool_names,
-                            Some(&failure),
-                            true,
-                        )
-                        .await
-                    {
-                        return Won::Failed(PublicError::internal());
-                    }
-                    return Won::Failed(collection_public_error(&failure.boundary()));
-                }
                 committed.tool_search_rounds = std::mem::take(&mut tool_search_rounds);
                 return Won::Committed(committed);
             }

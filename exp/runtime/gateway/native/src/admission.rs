@@ -226,6 +226,9 @@ impl Admission {
     pub(crate) fn stream_incremental(&self, depth: usize) -> bool {
         self.output_guardrail == OutputGuardrailMode::Stream
             && self.stream
+            && self.web_search.is_none()
+            && self.tool_search.is_none()
+            && self.tool_search_rounds.is_empty()
             && !self.reasoning_exposed_at(depth)
     }
 
@@ -376,25 +379,48 @@ pub(crate) async fn acquire_permit(
     }
 }
 
-/// Enforce the winning completion's output chain before any caller byte.
+/// Inspect generated search content and the winning completion as one output subject.
 ///
-/// A deterministic chain is enforced natively against the compiled detectors
-/// this server was started with. Every other guarded admission crosses the
-/// python boundary exactly as before, and an unguarded admission does
-/// neither.
+/// Deterministic checks use the native plan; other checks use the shared Python session.
+/// Generated metadata must remain unchanged because protocol encoders synthesize it from
+/// admission. Return only provider events after verifying the complete subject so encoders
+/// can add the approved metadata exactly once.
 pub(crate) async fn apply_output_guardrail(
     state: &AppState,
     admission: &Admission,
     events: Vec<Event>,
     deadline: Instant,
+    responses: bool,
 ) -> Result<Vec<Event>, Failure> {
-    if let Some(plan) = admission.guardrail_output_plan.as_ref() {
-        return guardrails::plan::enforce(plan, &state.guardrail_detectors, events, deadline);
-    }
-    if !admission.output_guardrail.enforces() {
+    if !admission.buffers_output() {
         return Ok(events);
     }
-    guardrails::enforce_collected_output(&state.bridge, &admission.request_id, events).await
+    let mut subject = crate::waterfall::OutputGuardrailContext {
+        web_search: admission.web_search.as_ref(),
+        responses,
+    }
+    .events(&admission.request_id, &admission.tool_search_rounds);
+    let prefix_len = subject.len();
+    let prefix =
+        (prefix_len > 0).then(|| guardrails::output_argument(&admission.request_id, &subject));
+    subject.extend(events);
+    let mut inspected = if let Some(plan) = admission.guardrail_output_plan.as_ref() {
+        guardrails::plan::enforce(plan, &state.guardrail_detectors, subject, deadline)?
+    } else {
+        guardrails::enforce_collected_output(&state.bridge, &admission.request_id, subject).await?
+    };
+    if prefix.is_some_and(|expected| {
+        inspected.len() < prefix_len
+            || guardrails::output_argument(&admission.request_id, &inspected[..prefix_len])
+                != expected
+    }) {
+        return Err(Failure::new(
+            FailureClass::Guardrail,
+            "The request was blocked by a gateway guardrail.",
+        ));
+    }
+    drop(inspected.drain(..prefix_len));
+    Ok(inspected)
 }
 
 #[cfg(test)]

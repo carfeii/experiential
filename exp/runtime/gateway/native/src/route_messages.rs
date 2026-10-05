@@ -602,7 +602,8 @@ async fn guarded_messages(
         }
     };
     disclose_after_collection(&mut admission, &committed);
-    let events = match apply_output_guardrail(&state, &admission, collected, deadline).await {
+    let events = match apply_output_guardrail(&state, &admission, collected, deadline, false).await
+    {
         Ok(events) => events,
         Err(failure) => {
             guard
