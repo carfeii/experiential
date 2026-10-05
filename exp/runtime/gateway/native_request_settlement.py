@@ -14,6 +14,17 @@ from exp.runtime.openai_protocol.errors import OpenAIProtocolError
 
 @dataclass
 class _Settlement:
+    """One request's original terminal write and its retry ownership.
+
+    Attributes:
+        authorization: Frozen authority for the accepted request.
+        failure: Original terminal failure to preserve across retries.
+        certify_no_effects: Whether accounting can certify no paid work occurred.
+        web_search_requests: Completed search count to persist with the request.
+        retained: Whether a failed write needs recovery, false initially.
+        lock: Per-request lock serializing terminal writes and recovery attempts.
+    """
+
     authorization: AuthorizationSnapshot
     failure: GatewayFailure
     certify_no_effects: bool

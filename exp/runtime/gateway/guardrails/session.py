@@ -57,7 +57,12 @@ class GuardrailSession:
         engine: Shared bounded classifier executor and decision recorder.
         policies: All applicable policies, captured once under authenticated authority.
         deadline_monotonic: Original absolute deadline, never renewed by polls or retries.
-        detectors: Pure native implementations of configured deterministic adapters.
+        detectors: Pure native detector implementations, empty until configured.
+        _input: Pending parallel input inspection, or None before it starts.
+        _input_failure: Retained input rejection, or None until inspection fails.
+        _input_approved_at: Approval time, or None before the current subject is approved.
+        _closed: Whether cancellation closed this session, false initially.
+        _inspected: Exact input and approved-result pairs, empty before inspection.
     """
 
     engine: GuardrailEngine

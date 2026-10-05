@@ -7,7 +7,11 @@ from unittest.mock import patch
 
 import pytest
 
-from exp.runtime.gateway.contracts import GatewayFailure, GatewayFailureClass
+from exp.runtime.gateway.contracts import (
+    AuthorizationSnapshot,
+    GatewayFailure,
+    GatewayFailureClass,
+)
 from exp.runtime.gateway.native_accounting_errors import NativeBridgeError
 from exp.runtime.gateway.native_accounting_test import _RecordingLedger, _registry
 from exp.runtime.gateway.native_request_settlement import RequestSettlements
@@ -46,8 +50,12 @@ def test_ledger_without_unattempted_search_contract_is_rejected_at_startup() -> 
     ledger = _RecordingLedger()
 
     def incomplete_contract(
-        *, authorization: object, failure: object, certify_no_effects: bool = False
+        *,
+        authorization: AuthorizationSnapshot,
+        failure: GatewayFailure,
+        certify_no_effects: bool = False,
     ) -> bool:
+        """Expose an incomplete ledger signature without allowing a write."""
         raise AssertionError("startup validation must not execute the ledger")
 
     with patch.object(ledger, "finish_request", incomplete_contract):
@@ -61,7 +69,14 @@ def test_normal_in_progress_terminal_write_does_not_block_unrelated_admission() 
     entered, release = threading.Event(), threading.Event()
     calls: list[int] = []
 
-    def commit(**kwargs: object) -> bool:
+    def commit(
+        *,
+        authorization: AuthorizationSnapshot,
+        failure: GatewayFailure,
+        certify_no_effects: bool = False,
+        web_search_requests: int = 0,
+    ) -> bool:
+        """Hold a successful terminal write open while another request checks admission."""
         calls.append(1)
         entered.set()
         assert release.wait(3)

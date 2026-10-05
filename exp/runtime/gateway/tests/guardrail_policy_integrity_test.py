@@ -44,7 +44,10 @@ def _provider(frames: bytes) -> Iterator[tuple[str, list[bytes]]]:
     received: list[bytes] = []
 
     class Provider(BaseHTTPRequestHandler):
+        """Serve the configured response while retaining each dispatched request body."""
+
         def do_POST(self) -> None:  # noqa: N802 - HTTP protocol.
+            """Record one request and return the finite configured event stream."""
             received.append(self.rfile.read(int(self.headers["content-length"])))
             self.send_response(200)
             self.send_header("content-type", "text/event-stream")
@@ -53,6 +56,7 @@ def _provider(frames: bytes) -> Iterator[tuple[str, list[bytes]]]:
             self.wfile.write(frames)
 
         def log_message(self, format: str, *args: object) -> None:
+            """Suppress the HTTP fixture's default stderr access log."""
             del format, args
 
     provider = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
@@ -110,6 +114,8 @@ def test_replay_claim_and_admission_must_share_the_same_policy_snapshot(
     )
 
     class ReloadingPlane(NativeControlPlane):
+        """Change policy once after a keyed request has claimed its replay identity."""
+
         reloaded = False
 
         def claim_scope(self, argument: str) -> str:

@@ -174,7 +174,14 @@ class GuardrailToolCall(ContractModel):
 
 
 class GuardrailCompletion(ContractModel):
-    """Normalized output subject, including readable alternate channels in ``context``."""
+    """Normalized output subject, including readable alternate channels in ``context``.
+
+    Attributes:
+        text: Collected visible text, empty when the provider emits no text.
+        refusal: Whether the provider refused the request, false by default.
+        tool_calls: Completed tool invocations, empty when none were emitted.
+        context: Readable alternate output channels, empty when none were emitted.
+    """
 
     text: str = ""
     refusal: bool = False

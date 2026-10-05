@@ -25,9 +25,12 @@ class _Accounting:
 
 
 class _Plane(NativeToolSearchMixin):
+    """Expose tool-search callbacks with one injected accounting entry."""
+
     _guardrails = None
 
     def __init__(self, entry: InflightRequest | None) -> None:
+        """Bind the entry lookup used by each callback."""
         self._accounting: _Registry = _Accounting(entry)
 
 
