@@ -431,7 +431,8 @@ impl AttemptGuard {
                 .wait(&self.bridge)
                 .await
                 .and_then(|d| d.require_allow())
-                .err(),
+                .err()
+                .map(|failure| failure.failure),
             None => None,
         };
         let outcome = if input_failure.is_some() {

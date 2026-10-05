@@ -20,6 +20,7 @@ from exp.runtime.gateway.guardrails.session import GuardrailSession, denied_inpu
 from exp.runtime.gateway.native_accounting_errors import NativeBridgeError
 from exp.runtime.gateway.native_capture import (
     CaptureController,
+    PendingCapture,
     begin_capture,
     capture_unavailable_failure,
     discard_capture,
@@ -29,6 +30,40 @@ from exp.runtime.openai_protocol.errors import OpenAIProtocolError
 if TYPE_CHECKING:
     from exp.runtime.gateway.guardrails.enforcement import GuardrailEngine
     from exp.runtime.gateway.native_accounting import NativeAttemptAccounting
+
+
+def require_capture(
+    controller: CaptureController | None,
+    accounting: NativeAttemptAccounting,
+    authorization: AuthorizationSnapshot,
+    pending: PendingCapture | None,
+) -> None:
+    """Register approved input or terminalize unavailable synchronous capture admission.
+
+    Args:
+        controller: Optional host-configured capture collector and policy.
+        accounting: Owner of the already accepted request's durable terminal write.
+        authorization: Exact authenticated request identity.
+        pending: Approved public context, or None when capture is disabled.
+
+    Returns:
+        None once capture is registered or does not apply.
+
+    Raises:
+        NativeBridgeError: Capture is unavailable; accounting retains the failed request
+            before the sanitized 503 is raised, without dispatching a provider.
+    """
+    if pending is None or begin_capture(
+        controller, authorization, pending.request, session_id=pending.session_id
+    ):
+        return
+    failure = capture_unavailable_failure()
+    accounting.finish_request_quietly(authorization, failure)
+    raise NativeBridgeError(
+        OpenAIProtocolError(
+            status_code=503, code="capture_unavailable", message=failure.safe_message
+        )
+    )
 
 
 def validate_guardrail_engine(engine: GuardrailEngine | None) -> None:
@@ -300,10 +335,15 @@ class NativeGuardrailsMixin:
                     decision = session.input_decision()
             finally:
                 entry.execution_lock.release()
-                if entry.pending_abandon is not None:
-                    self._accounting.abandon(argument)
-                if began and self._accounting.entry(request_id) is not entry:
-                    discard_capture(self._capture, request_id)
+                try:
+                    if entry.pending_abandon is not None:
+                        self._accounting.abandon(argument)
+                finally:
+                    if began and (
+                        entry.pending_abandon is not None
+                        or self._accounting.entry(request_id) is not entry
+                    ):
+                        discard_capture(self._capture, request_id)
         return (
             json.dumps(decision)
             if self._accounting.entry(request_id) is entry and entry.pending_abandon is None

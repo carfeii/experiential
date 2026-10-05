@@ -18,13 +18,9 @@ from exp.runtime.gateway.contracts import (
     GatewayFailureClass,
     GatewayRequest,
 )
-from exp.runtime.gateway.native_accounting_errors import NativeBridgeError
-from exp.runtime.openai_protocol.errors import OpenAIProtocolError
 
 if TYPE_CHECKING:
     from exp_gateway_native import CaptureCollector
-
-    from exp.runtime.gateway.native_accounting import NativeAttemptAccounting
 
 _LOGGER = logging.getLogger(__name__)
 Identifier = Annotated[str, Field(min_length=1, max_length=512)]
@@ -318,40 +314,7 @@ def capture_unavailable_failure() -> GatewayFailure:
     return GatewayFailure(
         failure_class=GatewayFailureClass.UNAVAILABLE,
         safe_message="Traffic capture is unavailable or at capacity. Restore capacity and retry.",
-    )
-
-
-def require_capture(
-    controller: CaptureController | None,
-    accounting: NativeAttemptAccounting,
-    authorization: AuthorizationSnapshot,
-    pending: PendingCapture | None,
-) -> None:
-    """Register approved input or terminalize unavailable synchronous capture admission.
-
-    Args:
-        controller: Optional host-configured capture collector and policy.
-        accounting: Owner of the already accepted request's durable terminal write.
-        authorization: Exact authenticated request identity.
-        pending: Approved public context, or None when capture is disabled.
-
-    Returns:
-        None once capture is registered or does not apply.
-
-    Raises:
-        NativeBridgeError: Capture is unavailable; accounting retains the failed request
-            before the sanitized 503 is raised, without dispatching a provider.
-    """
-    if pending is None or begin_capture(
-        controller, authorization, pending.request, session_id=pending.session_id
-    ):
-        return
-    failure = capture_unavailable_failure()
-    accounting.finish_request_quietly(authorization, failure)
-    raise NativeBridgeError(
-        OpenAIProtocolError(
-            status_code=503, code="capture_unavailable", message=failure.safe_message
-        )
+        safe_details={"code": "capture_unavailable"},
     )
 
 

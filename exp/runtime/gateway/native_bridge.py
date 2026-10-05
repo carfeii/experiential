@@ -29,6 +29,7 @@ from exp.runtime.gateway.guardrails.native import (
     NativeGuardrailsMixin,
     native_output_mode,
     open_admission_guardrails,
+    require_capture,
     validate_guardrail_engine,
 )
 from exp.runtime.gateway.model_chain_authority import authorize_serving_model_chains
@@ -62,7 +63,6 @@ from exp.runtime.gateway.native_bridge_errors import (
 from exp.runtime.gateway.native_capture import (
     CaptureController,
     PendingCapture,
-    require_capture,
     select_capture_model,
 )
 from exp.runtime.gateway.native_components import NativeGatewayComponents, SyncWriteLedger

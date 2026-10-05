@@ -145,6 +145,15 @@ def test_parallel_capture_waits_for_input_approval_and_fails_without_charge(
             assert ("private-provider-result" in response.text) == (outcome == "allow")
             assert "private-capture-policy-error" not in response.text
             assert "private-detector-error-must-not-escape" not in response.text
+            if outcome in {"full", "broken"}:
+                error = response.json()["error"]
+                if surface == "messages":
+                    assert error["type"] == "overloaded_error"
+                else:
+                    assert error["code"] == "capture_unavailable"
+                    assert error["type"] == "invalid_request_error"
+            elif outcome in {"error", "timeout"} and surface != "messages":
+                assert response.json()["error"]["code"] == "gateway_unavailable"
             with sqlite3.connect(components.ledger.database_path) as db:
                 requests = db.execute(
                     "select request_id, terminal_state from gateway_requests"
@@ -348,11 +357,12 @@ def test_stale_approval_poll_cannot_release_after_capture_failure(
         assert admission.records == []
 
 
+@pytest.mark.parametrize("retained_abandonment", [False, True])
 def test_abandon_during_capture_begin_discards_registration_and_pending_context(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retained_abandonment: bool
 ) -> None:
-    """A host callback that finishes after cancellation cannot leave a capture until TTL."""
-    with _pending_admission(tmp_path) as admission:
+    """Capture capacity is released even if a closing request's ledger write needs retry."""
+    with _pending_admission(tmp_path) as admission, monkeypatch.context() as patch:
         argument = _approve(admission)
         entered = threading.Event()
         release = threading.Event()
@@ -371,7 +381,13 @@ def test_abandon_during_capture_begin_discards_registration_and_pending_context(
             assert release.wait(2)
             return accepted
 
-        monkeypatch.setattr(admission.capture, "begin", begin)
+        patch.setattr(admission.capture, "begin", begin)
+        if retained_abandonment:
+            patch.setattr(
+                admission.control._accounting._write_ledger,  # noqa: SLF001 - durable write boundary.
+                "finish_request",
+                Mock(side_effect=RuntimeError("private ledger failure")),
+            )
         with ThreadPoolExecutor(max_workers=1) as executor:
             poll = executor.submit(admission.control.guardrail_input_status, argument)
             try:
@@ -382,9 +398,15 @@ def test_abandon_during_capture_begin_discards_registration_and_pending_context(
                 }
             finally:
                 release.set()
-            assert json.loads(poll.result(timeout=2)) == {"action": "closed"}
+            if retained_abandonment:
+                with pytest.raises(NativeBridgeError):
+                    poll.result(timeout=2)
+            else:
+                assert json.loads(poll.result(timeout=2)) == {"action": "closed"}
         request_id = admission.entry.authorization.request_id
-        assert admission.control._accounting.entry(request_id) is None  # noqa: SLF001
+        assert admission.control._accounting.entry(request_id) is (  # noqa: SLF001
+            admission.entry if retained_abandonment else None
+        )
         assert admission.entry.pending_capture is None
         assert admission.records == []
         # The one-record budget is available immediately, not after a TTL or maintenance sweep.

@@ -9,7 +9,7 @@ use tokio::sync::OnceCell;
 
 use crate::bridge::Bridge;
 use crate::encode::compact_json;
-use crate::errors::{Failure, FailureClass};
+use crate::errors::{Failure, FailureClass, PublicError};
 use crate::relay::{collection_public_error, remaining};
 use crate::settlement::AttemptGuard;
 use crate::waterfall::{acquire_attempt, WaterfallContext, Won};
@@ -18,7 +18,7 @@ use crate::waterfall::{acquire_attempt, WaterfallContext, Won};
 pub(crate) struct InputGate {
     request_id: String,
     deadline: Instant,
-    decision: OnceCell<Result<InputDecision, Failure>>,
+    decision: OnceCell<Result<InputDecision, InputFailure>>,
 }
 
 #[derive(Clone, Copy)]
@@ -28,7 +28,7 @@ pub(crate) enum InputDecision {
 }
 
 impl InputDecision {
-    pub(crate) fn require_allow(self) -> Result<(), Failure> {
+    pub(crate) fn require_allow(self) -> Result<(), InputFailure> {
         match self {
             Self::Allowed => Ok(()),
             Self::AdmissionClosed => Err(unavailable()),
@@ -39,18 +39,63 @@ impl InputDecision {
 #[derive(Deserialize)]
 struct Decision {
     action: String,
-    failure: Option<Failure>,
+    failure: Option<InputFailure>,
 }
 
-fn unavailable() -> Failure {
-    Failure::new(
-        FailureClass::Unavailable,
-        "Content inspection is unavailable. Retry later.",
-    )
+/// Closed vocabulary of public errors authorized by the request-owned input session.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum InputFailureCode {
+    CaptureUnavailable,
+}
+
+/// Only the typed public code is consumed; other session facts remain control-plane owned.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct InputFailureDetails {
+    code: Option<InputFailureCode>,
+}
+
+/// One cached session failure with its public code and unchanged settlement facts.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct InputFailure {
+    #[serde(flatten)]
+    pub(crate) failure: Failure,
+    #[serde(default)]
+    safe_details: InputFailureDetails,
+}
+
+impl InputFailure {
+    /// Preserve capture admission's typed 503 without changing ordinary classifier failures.
+    fn public_error(self) -> PublicError {
+        let failure = self.failure.boundary();
+        match self.safe_details.code {
+            Some(InputFailureCode::CaptureUnavailable)
+                if failure.failure_class == FailureClass::Unavailable =>
+            {
+                PublicError::new(
+                    503,
+                    "capture_unavailable",
+                    &failure.safe_message,
+                    "invalid_request_error",
+                )
+            }
+            _ => collection_public_error(&failure),
+        }
+    }
+}
+
+fn unavailable() -> InputFailure {
+    InputFailure {
+        failure: Failure::new(
+            FailureClass::Unavailable,
+            "Content inspection is unavailable. Retry later.",
+        ),
+        safe_details: InputFailureDetails::default(),
+    }
 }
 
 impl InputGate {
-    pub(crate) async fn wait(&self, bridge: &Bridge) -> Result<InputDecision, Failure> {
+    pub(crate) async fn wait(&self, bridge: &Bridge) -> Result<InputDecision, InputFailure> {
         self.decision
             .get_or_init(|| async {
                 // Each callback is a nonblocking poll. No classifier can occupy
@@ -87,7 +132,7 @@ impl InputGate {
     }
 }
 
-fn release(won: Won, decision: InputDecision) -> Result<Won, Failure> {
+fn release(won: Won, decision: InputDecision) -> Result<Won, InputFailure> {
     // A terminal admission failure owns its public error. A closed admission
     // never authorizes releasing a provider completion or any prefix.
     if matches!(won, Won::Failed(_)) {
@@ -135,8 +180,68 @@ pub(crate) async fn acquire_guarded_attempt(
             // Dropping acquire/the committed relay closes upstream immediately.
             // The guard retains witnessed usage for our cost, while the host
             // applies the input verdict to customer settlement.
-            guard.fail_before_release(&failure).await;
-            Won::Failed(collection_public_error(&failure.boundary()))
+            guard.fail_before_release(&failure.failure).await;
+            Won::Failed(failure.public_error())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_error_keeps_its_code_and_underlying_settlement_failure() {
+        let decision: Decision = serde_json::from_value(json!({
+            "action": "error",
+            "failure": {
+                "failure_class": "unavailable",
+                "safe_message": "Traffic capture is unavailable or at capacity.",
+                "safe_details": {"code": "capture_unavailable", "input_guardrail_denied": true},
+                "retryable_same_deployment": false,
+                "failover_eligible": false
+            }
+        }))
+        .expect("typed session failure");
+        let failure = decision.failure.expect("capture failure");
+        assert_eq!(failure.failure.failure_class, FailureClass::Unavailable);
+        assert!(!failure.failure.retryable_same_deployment);
+        assert!(!failure.failure.failover_eligible);
+        let error = failure.public_error();
+        assert_eq!(error.status_code, 503);
+        assert_eq!(error.code, "capture_unavailable");
+        assert_eq!(error.error_type, "invalid_request_error");
+        assert_eq!(error.retry_after_seconds, None);
+    }
+
+    #[test]
+    fn ordinary_classifier_failure_keeps_gateway_unavailable() {
+        let decision: Decision = serde_json::from_value(json!({
+            "action": "error",
+            "failure": {
+                "failure_class": "unavailable",
+                "safe_message": "Content inspection is unavailable.",
+                "safe_details": {"input_guardrail_denied": true}
+            }
+        }))
+        .expect("ordinary session failure");
+        let error = decision.failure.expect("classifier failure").public_error();
+        assert_eq!(error.status_code, 503);
+        assert_eq!(error.code, "gateway_unavailable");
+        assert_eq!(error.error_type, "api_error");
+    }
+
+    #[test]
+    fn unknown_public_code_rejects_the_input_decision() {
+        let decision = serde_json::from_value::<Decision>(json!({
+            "action": "error",
+            "failure": {
+                "failure_class": "unavailable",
+                "safe_message": "untrusted diagnostic",
+                "safe_details": {"code": "unsupported-code"}
+            }
+        }));
+        assert!(decision.is_err(), "unknown public code must fail closed");
+        assert_eq!(unavailable().public_error().code, "gateway_unavailable");
     }
 }

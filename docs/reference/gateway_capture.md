@@ -175,8 +175,12 @@ existing admission charge instead. Sustained storage pressure can exhaust the
 separate admission or response-memory bounds in either mode.
 
 When capture is required but admission cannot register it, the gateway returns a
-sanitized `capture_unavailable` 503 before provider dispatch. Policy-disabled capture
-still serves normally. An eligible response waits for durable acknowledgement
+sanitized `capture_unavailable` 503. Synchronous input inspection registers capture
+before provider dispatch. Parallel input inspection registers it only after input
+approval and before releasing the response; registration failure stops speculative
+generation and settles the request without charging the customer. A cancelled
+registration releases capture capacity even when durable cancellation needs retry.
+Policy-disabled capture still serves normally. An eligible response waits for durable acknowledgement
 unless its host explicitly enables asynchronous delivery. Asynchronous handoff
 does not wait for delivery-queue capacity; it does not remove admission or
 response-memory bounds. A destination error retains the current record and
