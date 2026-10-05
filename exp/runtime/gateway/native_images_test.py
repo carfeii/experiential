@@ -157,3 +157,18 @@ def test_admit_rejects_protocol_failures_before_any_ledger_write(tmp_path: Path)
         _admit(control, "not-a-key", {"model": "coding", "prompt": "a cat"})
     assert _public_error(unknown.value)["status_code"] == 401
     assert json.loads(control.usage_json("{}"))["totals"]["requests"] == 0
+
+
+def test_admit_attributes_the_calling_app(tmp_path: Path) -> None:
+    """The forwarded User-Agent classifies a images caller onto its durable request."""
+    control, raw_key = _control_plane(tmp_path, images=True)
+    argument = {
+        "raw_key": raw_key,
+        "body": json.dumps({"model": "coding", "prompt": "a cat"}),
+        "user_agent": "claude-cli/2.1.278 (external, cli)",
+    }
+    control.admit_images(json.dumps(argument))
+    ledger = cast("SQLiteAttemptLedger", control._components.ledger)  # noqa: SLF001
+    with sqlite3.connect(ledger.database_path) as connection:
+        rows = connection.execute("select client_app, user_agent from gateway_requests").fetchall()
+    assert rows == [("claude_code", "claude-cli/2.1.278 (external, cli)")]

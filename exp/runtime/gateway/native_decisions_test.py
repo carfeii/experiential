@@ -484,3 +484,21 @@ def test_configured_guardrails_refuse_uninspectable_decisions_before_acceptance(
     assert _public_error(error.value)["code"] == "unsupported_capability"
     assert _rows(control) == []
     assert not detector.requests
+
+
+def test_admit_decisions_attributes_the_calling_app(tmp_path: Path) -> None:
+    """Forwarded app headers classify a decisions caller onto its durable request."""
+    control, raw_key = _control_plane(tmp_path)
+    for headers in (
+        {"user_agent": "OpenAI/Python 2.8.1"},
+        {"user_agent": "node", "app_title": "Hermes Agent"},
+    ):
+        control.admit_decisions(
+            json.dumps({"raw_key": raw_key, "body": json.dumps(_body()), **headers})
+        )
+    ledger = cast("SQLiteAttemptLedger", control._components.ledger)  # noqa: SLF001
+    with sqlite3.connect(ledger.database_path) as connection:
+        rows = connection.execute(
+            "select client_app, user_agent from gateway_requests order by rowid"
+        ).fetchall()
+    assert rows == [("openai_sdk", "OpenAI/Python 2.8.1"), ("hermes", "node")]

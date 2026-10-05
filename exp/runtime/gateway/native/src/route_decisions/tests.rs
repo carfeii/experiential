@@ -594,17 +594,16 @@ fn default_single_attempt_policy_never_redials_unknown_idempotency() {
 #[test]
 fn admission_forwards_attribution_and_trusted_ip_but_not_idempotency() {
     let mut headers = HeaderMap::new();
-    headers.insert(
-        "http-referer",
-        "https://app.example.invalid".parse().unwrap(),
-    );
+    headers.insert("http-referer", "https://a.invalid".parse().unwrap());
     headers.insert("x-title", "Decision app".parse().unwrap());
     headers.insert("x-forwarded-for", "203.0.113.7, 192.0.2.9".parse().unwrap());
     headers.insert("idempotency-key", "caller-key".parse().unwrap());
+    headers.insert("user-agent", "OpenAI/Python 2.8.1".parse().unwrap());
     let argument: Value =
         serde_json::from_str(&admission_argument("gateway-key", "{}", &headers)).unwrap();
-    assert_eq!(argument["app_referer"], "https://app.example.invalid");
+    assert_eq!(argument["app_referer"], "https://a.invalid");
     assert_eq!(argument["app_title"], "Decision app");
+    assert_eq!(argument["user_agent"], "OpenAI/Python 2.8.1");
     assert_eq!(argument["client_ip"], "192.0.2.9");
     assert_eq!(argument["raw_key"], "gateway-key");
     assert!(argument.get("idempotency_key").is_none());

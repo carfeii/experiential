@@ -22,6 +22,7 @@ from dataclasses import replace
 from typing import Protocol
 
 from exp.common.core.artifacts import JsonObject
+from exp.runtime.gateway.client_apps import with_client_identity
 from exp.runtime.gateway.contracts import (
     AuthorizationSnapshot,
     DirectTarget,
@@ -147,6 +148,7 @@ class NativeEmbeddingsMixin:
                 deadline_monotonic=deadline,
             )
             authorization = authorize_serving_model_chains(self._components, authorization)
+            authorization = with_client_identity(authorization, data)  # reporting-only app facts
         except Exception as exc:  # noqa: BLE001 - boundary sanitizes every failure.
             raise authority_error(exc) from exc
         require_unguarded_surface(self._guardrails, authorization, "embeddings")
