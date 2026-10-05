@@ -35,6 +35,7 @@ from exp.runtime.gateway.execution_resolution import alias_native_blockers as al
 from exp.runtime.gateway.guardrails.session import GuardrailSession
 from exp.runtime.gateway.health import DeploymentHealthKey, DeploymentHealthRegistry
 from exp.runtime.gateway.model_plan import project_stage_selection
+from exp.runtime.gateway.native_capture import PendingCapture
 from exp.runtime.gateway.native_fallback_rules import FallbackRules, eligible_depths
 from exp.runtime.gateway.native_responses import ContinuationContext
 from exp.runtime.gateway.native_settlement import deployment_operation_key
@@ -170,6 +171,7 @@ class InflightRequest:
         explicit_cache_state: Private marked-prefix plans and durable operation bindings,
             absent unless a host provides explicit cache spending authority.
         guardrails: The single request-owned policy and response-release lifecycle.
+        pending_capture: Public context awaiting the same session's input approval, or None.
     """
 
     authorization: AuthorizationSnapshot
@@ -199,6 +201,7 @@ class InflightRequest:
     # successful terminal; chat attempts carry ``None``.
     continuation: ContinuationContext | None = None
     guardrails: GuardrailSession | None = field(default=None, repr=False)
+    pending_capture: PendingCapture | None = field(default=None, repr=False)
     # One signer per route deployment, for body-signing dialects (Bedrock
     # SigV4); ``None`` at a depth whose dialect serializes its own payload.
     signers: tuple[GatewayDispatchSigner | None, ...] = ()

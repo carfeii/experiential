@@ -18,6 +18,12 @@ from exp.runtime.gateway.guardrails.contracts import (
 )
 from exp.runtime.gateway.guardrails.session import GuardrailSession, denied_input_failure
 from exp.runtime.gateway.native_accounting_errors import NativeBridgeError
+from exp.runtime.gateway.native_capture import (
+    CaptureController,
+    begin_capture,
+    capture_unavailable_failure,
+    discard_capture,
+)
 from exp.runtime.openai_protocol.errors import OpenAIProtocolError
 
 if TYPE_CHECKING:
@@ -226,28 +232,81 @@ def upstream_requests_reasoning(wire_route: Sequence[JsonObject]) -> bool:
 
 
 class _GuardrailPlane(Protocol):
-    """Accounting is the sole owner of each admitted request's session."""
+    """Services used by each admitted request's sole guardrail session.
+
+    Attributes:
+        _accounting: Owner of live requests and their terminal settlement.
+        _capture: Optional collector bound to the host's authenticated capture policy.
+    """
 
     _accounting: NativeAttemptAccounting
+    _capture: CaptureController | None
 
 
 class NativeGuardrailsMixin:
     """Resolve native operations to one frozen session, independent of policy scope."""
 
     def guardrail_input_status(self: _GuardrailPlane, argument: str) -> str:
-        """Poll approval without tying up a bridge worker or authorizing a closed request."""
+        """Poll the shared input session and register capture once before allowing release.
+
+        An occupied request lock returns pending rather than blocking a bridge worker.
+        Capture failure is retained in the same session for zero-charge settlement;
+        cancellation discards capture registered while its owner was closing.
+
+        Args:
+            argument: JSON object containing the authenticated admission's request_id.
+
+        Returns:
+            A JSON pending, allow, error, or closed decision. Allow requires both current
+            session approval and successful required capture registration.
+
+        Raises:
+            NativeBridgeError: A concurrent abandonment's durable terminal write failed;
+                accounting keeps the request for retry and the native gate fails closed.
+        """
         request_id = str(json.loads(argument).get("request_id") or "")
         entry = self._accounting.entry(request_id)
-        if entry is None:
+        if entry is None or entry.pending_abandon is not None:
             return '{"action":"closed"}'
         decision = (
             {"action": "error", "failure": denied_input_failure().model_dump(mode="json")}
             if entry.guardrails is None
             else entry.guardrails.input_decision()
         )
+        if decision["action"] == "allow":
+            # Reservation owns this same lock during ledger I/O. Poll without
+            # waiting so unrelated dispatch and settlement workers remain available.
+            if not entry.execution_lock.acquire(blocking=False):
+                return '{"action":"pending"}'
+            began = False
+            try:
+                if self._accounting.entry(request_id) is not entry or entry.pending_abandon:
+                    return '{"action":"closed"}'
+                session = entry.guardrails
+                assert session is not None  # Only the same session's approval reaches capture.
+                decision = session.input_decision()
+                pending = entry.pending_capture
+                if decision["action"] == "allow" and pending is not None:
+                    began = begin_capture(
+                        self._capture,
+                        entry.authorization,
+                        pending.request,
+                        entry.route.snapshot.exact_model_id,
+                        session_id=pending.session_id,
+                    )
+                    if not began:
+                        session.cancel(capture_unavailable_failure())
+                    entry.pending_capture = None
+                    decision = session.input_decision()
+            finally:
+                entry.execution_lock.release()
+                if entry.pending_abandon is not None:
+                    self._accounting.abandon(argument)
+                if began and self._accounting.entry(request_id) is not entry:
+                    discard_capture(self._capture, request_id)
         return (
             json.dumps(decision)
-            if self._accounting.entry(request_id) is entry
+            if self._accounting.entry(request_id) is entry and entry.pending_abandon is None
             else '{"action":"closed"}'
         )
 

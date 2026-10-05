@@ -44,9 +44,11 @@ def denied_input_failure(failure: GatewayFailure | None = None) -> GatewayFailur
 
 
 def discard_guardrails(entry: InflightRequest | None) -> None:
-    """Cancel request-owned inspection after accounting removes its owner."""
-    if entry is not None and entry.guardrails is not None:
-        entry.guardrails.cancel()
+    """Drop deferred context and cancel inspection after accounting removes its owner."""
+    if entry is not None:
+        entry.pending_capture = None
+        if entry.guardrails is not None:
+            entry.guardrails.cancel()
 
 
 @dataclass
@@ -59,7 +61,7 @@ class GuardrailSession:
         deadline_monotonic: Original absolute deadline, never renewed by polls or retries.
         detectors: Pure native detector implementations, empty until configured.
         _input: Pending parallel input inspection, or None before it starts.
-        _input_failure: Retained input rejection, or None until inspection fails.
+        _input_failure: Retained input or required capture rejection, or None before failure.
         _input_approved_at: Approval time, or None before the current subject is approved.
         _closed: Whether cancellation closed this session, false initially.
         _inspected: Exact input and approved-result pairs, empty before inspection.
@@ -267,8 +269,15 @@ class GuardrailSession:
             return denied_input_failure()
         return GatewayFailure.model_validate(decision["failure"])
 
-    def cancel(self) -> None:
-        """Stop work once no request owner can consume its verdict."""
+    def cancel(self, failure: GatewayFailure | None = None) -> None:
+        """Stop work and retain any required-release failure for zero-charge settlement.
+
+        Args:
+            failure: Optional sanitized release failure to retain with the charge-waiver
+                marker. None closes the session without replacing an existing failure.
+        """
+        if failure is not None:
+            self._input_failure = denied_input_failure(failure)
         self._closed = True
         if self._input is not None:
             self._input.cancel()

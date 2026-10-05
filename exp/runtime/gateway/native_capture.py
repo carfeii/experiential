@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Literal
 
 from pydantic import Field, JsonValue, model_validator
@@ -11,10 +12,19 @@ from pydantic_core import to_json
 
 from exp.common.core.artifacts import ContractModel, JsonObject
 from exp.runtime.gateway.capture_context import capture_context_document
-from exp.runtime.gateway.contracts import AuthorizationSnapshot, GatewayRequest
+from exp.runtime.gateway.contracts import (
+    AuthorizationSnapshot,
+    GatewayFailure,
+    GatewayFailureClass,
+    GatewayRequest,
+)
+from exp.runtime.gateway.native_accounting_errors import NativeBridgeError
+from exp.runtime.openai_protocol.errors import OpenAIProtocolError
 
 if TYPE_CHECKING:
     from exp_gateway_native import CaptureCollector
+
+    from exp.runtime.gateway.native_accounting import NativeAttemptAccounting
 
 _LOGGER = logging.getLogger(__name__)
 Identifier = Annotated[str, Field(min_length=1, max_length=512)]
@@ -290,6 +300,61 @@ class CaptureController:
         return self.native.begin_bytes(to_json(record, inf_nan_mode="null"))
 
 
+@dataclass(frozen=True)
+class PendingCapture:
+    """Effective capture context held by admission until input approval.
+
+    Attributes:
+        request: Expanded public request whose input must be approved before retention.
+        session_id: Validated caller session identifier, or None when absent.
+    """
+
+    request: GatewayRequest
+    session_id: str | None
+
+
+def capture_unavailable_failure() -> GatewayFailure:
+    """Return the content-free failure shared by admission and deferred response release."""
+    return GatewayFailure(
+        failure_class=GatewayFailureClass.UNAVAILABLE,
+        safe_message="Traffic capture is unavailable or at capacity. Restore capacity and retry.",
+    )
+
+
+def require_capture(
+    controller: CaptureController | None,
+    accounting: NativeAttemptAccounting,
+    authorization: AuthorizationSnapshot,
+    pending: PendingCapture | None,
+) -> None:
+    """Register approved input or terminalize unavailable synchronous capture admission.
+
+    Args:
+        controller: Optional host-configured capture collector and policy.
+        accounting: Owner of the already accepted request's durable terminal write.
+        authorization: Exact authenticated request identity.
+        pending: Approved public context, or None when capture is disabled.
+
+    Returns:
+        None once capture is registered or does not apply.
+
+    Raises:
+        NativeBridgeError: Capture is unavailable; accounting retains the failed request
+            before the sanitized 503 is raised, without dispatching a provider.
+    """
+    if pending is None or begin_capture(
+        controller, authorization, pending.request, session_id=pending.session_id
+    ):
+        return
+    failure = capture_unavailable_failure()
+    accounting.finish_request_quietly(authorization, failure)
+    raise NativeBridgeError(
+        OpenAIProtocolError(
+            status_code=503, code="capture_unavailable", message=failure.safe_message
+        )
+    )
+
+
 def begin_capture(
     controller: CaptureController | None,
     authorization: AuthorizationSnapshot,
@@ -306,6 +371,16 @@ def begin_capture(
     except Exception:  # noqa: BLE001 - sanitize policy and collector failures at admission.
         _LOGGER.warning("capture.admission_failed request_id=%s", authorization.request_id)
         return False
+
+
+def discard_capture(controller: CaptureController | None, request_id: str) -> None:
+    """Release a newly registered capture if its request closed during host policy evaluation."""
+    if controller is None:
+        return
+    try:
+        controller.native.settle(request_id, False, False)
+    except Exception:  # noqa: BLE001 - preserve the closed request's sanitized outcome.
+        _LOGGER.warning("capture.discard_failed request_id=%s", request_id)
 
 
 def select_capture_model(

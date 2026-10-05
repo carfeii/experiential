@@ -61,7 +61,8 @@ from exp.runtime.gateway.native_bridge_errors import (
 )
 from exp.runtime.gateway.native_capture import (
     CaptureController,
-    begin_capture,
+    PendingCapture,
+    require_capture,
     select_capture_model,
 )
 from exp.runtime.gateway.native_components import NativeGatewayComponents, SyncWriteLedger
@@ -430,23 +431,16 @@ class NativeControlPlane(
         except Exception as exc:  # noqa: BLE001 - boundary sanitizes every failure.
             raise _authority_error(exc) from exc
 
-        if not begin_capture(
-            self._capture,
-            authorization,
-            captured_request,
-            session_id=optional_text(data.get("capture_session_id")),
-        ):
-            message = "Traffic capture is unavailable or at capacity. Restore capacity and retry."
-            self._accounting.finish_request_quietly(
-                authorization,
-                GatewayFailure(failure_class=GatewayFailureClass.UNAVAILABLE, safe_message=message),
-            )
-            raise NativeBridgeError(
-                OpenAIProtocolError(status_code=503, code="capture_unavailable", message=message)
-            )
-        # Escalation finishes the accepted request quietly before returning, so it is
-        # accounted content-free and never billed. Routing failures found by
-        # the probe are raised against the accepted request below.
+        pending_capture = (
+            PendingCapture(captured_request, optional_text(data.get("capture_session_id")))
+            if self._capture is not None
+            else None
+        )
+        if not parallel_guardrail:
+            require_capture(self._capture, self._accounting, authorization, pending_capture)
+            pending_capture = None
+        # Escalation is accounted without content or billing; probe routing
+        # failures are raised against the accepted request below.
         probe_failure: Exception | None = None
         web_search_admission: JsonObject | None = None
         tool_search_admission: JsonObject | None = None
@@ -741,6 +735,11 @@ class NativeControlPlane(
                     web_search_requests=1 if web_search_admission is not None else 0,
                 )
                 raise NativeBridgeError(public_failure_error(exc.failure)) from None
+        if pending_capture is not None and not (
+            guardrails is not None and guardrails.input_pending
+        ):
+            require_capture(self._capture, self._accounting, authorization, pending_capture)
+            pending_capture = None
         plan = None if guardrails is None else guardrails.output_plan()
         self._accounting.register(
             InflightRequest(
@@ -754,6 +753,7 @@ class NativeControlPlane(
                     and admission_without_effects(authorization, captured_request, None)
                 ),
                 guardrails=guardrails,
+                pending_capture=pending_capture,
                 signers=tuple(signers),
                 dispatch_bindings=tuple(dispatch_bindings),
                 reasoning_carrier_authorities=tuple(carrier_authorities),
