@@ -29,6 +29,7 @@ use crate::metrics::{classify_escalation, METRICS};
 use crate::relay::{collection_public_error, remaining};
 use crate::respond::{
     bearer_key, error_response, escalation_error, json_response, latin1_header, read_body,
+    with_app_identity,
 };
 use crate::server::AppState;
 use crate::settlement::AttemptGuard;
@@ -96,7 +97,9 @@ pub(crate) async fn images(
     };
     let client_request_id = latin1_header(&headers, "x-client-request-id");
 
-    let admit_argument = compact_json(&json!({"raw_key": raw_key, "body": body_text}));
+    let mut admit_value = json!({"raw_key": raw_key, "body": body_text});
+    with_app_identity(&mut admit_value, &headers);
+    let admit_argument = compact_json(&admit_value);
     let admission_text = match state.bridge.call("admit_images", admit_argument).await {
         Ok(text) => text,
         Err(error) => return error_response(&error),

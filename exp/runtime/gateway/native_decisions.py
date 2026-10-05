@@ -22,6 +22,7 @@ from exp.runtime.gateway.contracts import (
 )
 from exp.runtime.gateway.decisions_contracts import DecisionRequest, decode_decision_request
 from exp.runtime.gateway.guardrails.client import assert_not_internal_classification
+from exp.runtime.gateway.client_apps import with_client_identity
 from exp.runtime.gateway.model_chain_authority import authorize_serving_model_chains
 from exp.runtime.gateway.native_accounting import (
     NativeAttemptAccounting,
@@ -138,6 +139,7 @@ class NativeDecisionsMixin:
                 client_ip=optional_text(data.get("client_ip")),
             )
             authorization = authorize_serving_model_chains(self._components, authorization)
+            authorization = with_client_identity(authorization, data)  # reporting-only app facts
             self._write_ledger.accept_request(authorization=authorization)
         except Exception as exc:  # noqa: BLE001 - sanitize the authority boundary.
             raise authority_error(exc) from exc

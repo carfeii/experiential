@@ -24,7 +24,7 @@ use crate::rate_limit_headers::harvest_rate_limit_headers;
 use crate::relay::{collection_public_error, remaining};
 use crate::respond::{
     bearer_key, client_ip, error_response, escalation_error, json_response, latin1_header,
-    read_body,
+    read_body, with_app_identity,
 };
 use crate::server::AppState;
 use crate::settlement::AttemptGuard;
@@ -132,15 +132,15 @@ pub(crate) async fn decisions(
     }
 }
 
-/// Forward authority, attribution, and trusted proxy IP without caller idempotency.
+/// Forward authority, app identity, and trusted proxy IP without caller idempotency.
 fn admission_argument(raw_key: &str, body: &str, headers: &HeaderMap) -> String {
-    compact_json(&json!({
+    let mut argument = json!({
         "raw_key": raw_key,
         "body": body,
         "client_ip": client_ip(headers),
-        "app_referer": latin1_header(headers, "http-referer"),
-        "app_title": latin1_header(headers, "x-title"),
-    }))
+    });
+    with_app_identity(&mut argument, headers);
+    compact_json(&argument)
 }
 
 /// Reserve every physical dispatch through the same authority as other routes.

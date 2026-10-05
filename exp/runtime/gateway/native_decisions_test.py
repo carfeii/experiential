@@ -469,3 +469,21 @@ def test_decision_alias_rejects_chat_before_provider_payload(tmp_path: Path) -> 
     assert _public_error(raised.value)["status_code"] == 400
     assert _public_error(raised.value)["code"] == "unsupported_capability"
     assert _rows(control) == [("chat_completions", "failed")]
+
+
+def test_admit_decisions_attributes_the_calling_app(tmp_path: Path) -> None:
+    """Forwarded app headers classify a decisions caller onto its durable request."""
+    control, raw_key = _control_plane(tmp_path)
+    for headers in (
+        {"user_agent": "OpenAI/Python 2.8.1"},
+        {"user_agent": "node", "app_title": "Hermes Agent"},
+    ):
+        control.admit_decisions(
+            json.dumps({"raw_key": raw_key, "body": json.dumps(_body()), **headers})
+        )
+    ledger = cast("SQLiteAttemptLedger", control._components.ledger)  # noqa: SLF001
+    with sqlite3.connect(ledger.database_path) as connection:
+        rows = connection.execute(
+            "select client_app, user_agent from gateway_requests order by rowid"
+        ).fetchall()
+    assert rows == [("openai_sdk", "OpenAI/Python 2.8.1"), ("hermes", "node")]
